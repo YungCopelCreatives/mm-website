@@ -1,0 +1,6 @@
+{
+  "name": "M&M — Laundry, wherever you are",
+  "description": "Book a laundry pickup in seconds. Track the wash live. Get it back at your door.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

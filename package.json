@@ -1,0 +1,14 @@
+{
+  "name": "mm-website",
+  "version": "1.0.0",
+  "description": "Book a laundry pickup in seconds. Track the wash live. Get it back at your door.",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "build": "node -e \"console.log('Build completed')\""
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
