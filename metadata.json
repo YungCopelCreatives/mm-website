@@ -1,6 +1,6 @@
 {
   "name": "M&M — Laundry, wherever you are",
-  "description": "Book a laundry pickup in seconds. Track the wash live. Get it back at your door.",
+  "description": "Book an on-demand laundry pickup in 60 seconds with live wash tracking, eco-friendly detergents, and transparent rates delivered right to your door.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

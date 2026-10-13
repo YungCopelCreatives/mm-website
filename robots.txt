@@ -1,0 +1,6 @@
+# robots.txt for M&M Laundry Services
+User-agent: *
+Allow: /
+
+# Sitemaps
+Sitemap: /sitemap.xml

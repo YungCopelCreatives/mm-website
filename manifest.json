@@ -1,0 +1,50 @@
+{
+  "name": "M&M — Laundry, wherever you are",
+  "short_name": "M&M Laundry",
+  "description": "Book an on-demand laundry pickup in 60 seconds with live wash tracking, eco-friendly detergents, and transparent rates delivered right to your door.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#FFFFFF",
+  "theme_color": "#005162",
+  "categories": ["lifestyle", "shopping", "utilities"],
+  "shortcuts": [
+    {
+      "name": "Book a Pickup",
+      "short_name": "Book",
+      "description": "Schedule a doorstep laundry collection",
+      "url": "/book",
+      "icons": [{ "src": "/src/assets/images/regenerated_image_1790132247415.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Track Wash",
+      "short_name": "Track",
+      "description": "Check live status and driver ETA",
+      "url": "/orders",
+      "icons": [{ "src": "/src/assets/images/regenerated_image_1790132247415.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Services & Rates",
+      "short_name": "Services",
+      "description": "Explore South African laundry and dry cleaning pricing",
+      "url": "/services",
+      "icons": [{ "src": "/src/assets/images/regenerated_image_1790132247415.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Support & Help",
+      "short_name": "Support",
+      "description": "Contact dispatch and customer care",
+      "url": "/contact",
+      "icons": [{ "src": "/src/assets/images/regenerated_image_1790132247415.png", "sizes": "192x192" }]
+    }
+  ],
+  "icons": [
+    {
+      "src": "/src/assets/images/regenerated_image_1790132247415.png",
+      "sizes": "192x192 512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
