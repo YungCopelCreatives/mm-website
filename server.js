@@ -709,7 +709,7 @@ app.post('/api/orders/:id/advance', (req, res) => {
   const steps = [
     { key: 'placed', label: 'Order Confirmed', desc: 'Order placed and logged in system.' },
     { key: 'assigned', label: 'Driver Dispatched', desc: 'Local courier dispatched to your address.' },
-    { key: 'picked_up', label: 'Picked Up & Weighed', desc: 'Bags collected and verified on calibrated trade scale.' },
+    { key: 'picked_up', label: 'Picked Up & Verified', desc: 'Bags collected and verified by partner laundromat.' },
     { key: 'washing', label: 'In The Wash & Treatment', desc: 'Washing, sanitizing, and gentle cycle active.' },
     { key: 'inspection', label: 'Quality Check & Folding', desc: 'Hand-inspected, steam-pressed, and crisp folding.' },
     { key: 'out_for_delivery', label: 'Out for Return Delivery', desc: 'Courier en route back to your doorstep.' },

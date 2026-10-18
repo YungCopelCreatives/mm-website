@@ -7,14 +7,16 @@ let currentUser = null;
 let authToken = localStorage.getItem('mm_auth_token') || null;
 let currentTrackingOrder = null;
 
-// Rates & Service Definitions (South African ZAR & Metric Pricing)
+// Rates & Service Definitions (Partner Laundromat Basket Size & Individual Item Tariffs)
 const SERVICE_RATES = {
-  'wash_fold': { name: 'Wash & Fold (Everyday Clothes)', rate: 36.00, unit: 'per kg', defaultWeight: 10 },
-  'dry_clean': { name: 'Dry Cleaning & Care', rate: 85.00, unit: 'per item', defaultWeight: 4 },
-  'iron_press': { name: 'Wash & Iron Press', rate: 46.00, unit: 'per kg', defaultWeight: 10 },
-  'bedding': { name: 'Duvet & Bedding Care', rate: 165.00, unit: 'per bundle', defaultWeight: 1 },
-  'baby_clothes': { name: 'Baby Clothes & Hypoallergenic', rate: 38.00, unit: 'per kg', defaultWeight: 5 },
-  'express': { name: 'Express Same-Day Rush (12h)', rate: 48.00, unit: 'per kg', defaultWeight: 10 }
+  'wash_fold': { name: 'Wash & Fold (Everyday Clothes)', pricingType: 'basket_size', defaultSize: 'medium' },
+  'iron_press': { name: 'Wash & Steam Table Press', pricingType: 'basket_size', defaultSize: 'medium' },
+  'sneakers': { name: 'Sneakers & Footwear Care', pricingType: 'individual_item', defaultSize: 'single_item' },
+  'blankets': { name: 'Blankets, Duvets & Bedding', pricingType: 'individual_item', defaultSize: 'single_item' },
+  'carpets': { name: 'Carpets & Area Rugs', pricingType: 'individual_item', defaultSize: 'single_item' },
+  'dry_clean': { name: 'Suits & Tailored Dry Cleaning', pricingType: 'individual_item', defaultSize: 'single_item' },
+  'baby_clothes': { name: 'Baby Clothes & Hypoallergenic', pricingType: 'basket_size', defaultSize: 'small' },
+  'express': { name: 'Express Same-Day Rush (12h)', pricingType: 'basket_size', defaultSize: 'medium' }
 };
 
 function escapeHtml(str) {
@@ -44,6 +46,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initFullFaq();
   initCommercialCalc();
   initCarousels();
+  loadLiveLaundromats();
   initPickupCalculator();
   initForms();
   initExploreCardsTouch();
@@ -445,17 +448,45 @@ function populateLivePickupTimeSlots() {
   select.innerHTML = `<option value="" selected disabled>Select pickup time</option>` + slots.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
 }
 
+let liveLaundromatsList = [];
+
+async function loadLiveLaundromats() {
+  const select = document.getElementById('pickupLaundromatSelect');
+  try {
+    const res = await fetch('/api/laundromats');
+    const data = await res.json();
+    liveLaundromatsList = Array.isArray(data.laundromats) ? data.laundromats : [];
+    if (select) {
+      if (liveLaundromatsList.length === 0) {
+        select.innerHTML = '<option value="" disabled selected>No partner laundromats currently available</option>';
+      } else {
+        select.innerHTML = '<option value="" disabled selected>Select partner laundromat * (Required)</option>' +
+          liveLaundromatsList.map(l =>
+            `<option value="${escapeHtml(l.id)}" data-name="${escapeHtml(l.businessName)}" data-city="${escapeHtml(l.city || '')}">${escapeHtml(l.businessName)} · ${escapeHtml(l.city || '')} (${l.rating ? l.rating + ' ★' : 'Verified'})</option>`
+          ).join('');
+      }
+    }
+  } catch (err) {
+    console.error('Error loading laundromats:', err);
+    if (select) {
+      select.innerHTML = '<option value="" disabled selected>Select partner laundromat * (Required)</option>';
+    }
+  }
+}
+
 function initPickupCalculator() {
   populateLivePickupTimeSlots();
 
   const serviceSelect = document.getElementById('pickupServiceSelect');
   const sizeSelect = document.getElementById('pickupSizeSelect');
+  const laundromatSelect = document.getElementById('pickupLaundromatSelect');
   const detergentSelect = document.getElementById('pickupDetergentSelect');
   const timeSelect = document.getElementById('pickupTimeSlotSelect');
   const addressInput = document.getElementById('pickupAddressInput');
 
   if (serviceSelect) serviceSelect.addEventListener('change', updatePickupEstimate);
   if (sizeSelect) sizeSelect.addEventListener('change', updatePickupEstimate);
+  if (laundromatSelect) laundromatSelect.addEventListener('change', updatePickupEstimate);
   if (detergentSelect) detergentSelect.addEventListener('change', updatePickupEstimate);
   if (timeSelect) timeSelect.addEventListener('change', updatePickupEstimate);
   if (addressInput) addressInput.addEventListener('input', updatePickupEstimate);
@@ -466,151 +497,82 @@ function initPickupCalculator() {
 function updatePickupEstimate() {
   const serviceKey = document.getElementById('pickupServiceSelect')?.value || '';
   const sizeValue = document.getElementById('pickupSizeSelect')?.value || '';
+  const laundromatSelect = document.getElementById('pickupLaundromatSelect');
   const priceDisplay = document.getElementById('pickupEstimatedPrice');
   const weightDisplay = document.getElementById('pickupEstimatedWeight');
 
+  const bdLaundromat = document.getElementById('breakdownLaundromatName');
   const bdLabel = document.getElementById('breakdownServiceLabel');
   const bdSubtotal = document.getElementById('breakdownSubtotal');
   const bdDelivery = document.getElementById('breakdownDelivery');
   const bdDeliveryRow = document.getElementById('breakdownDeliveryRow');
   const bdDiscountRow = document.getElementById('breakdownDiscountRow');
-  const bdDiscount = document.getElementById('breakdownDiscount');
   const bdVat = document.getElementById('breakdownVat');
   const bdTotal = document.getElementById('breakdownTotal');
   const btnPayPill = document.getElementById('btnPayAmountPill');
 
-  // If service or load size has not been explicitly chosen, show placeholders and 0 totals
+  const sDef = SERVICE_RATES[serviceKey] || { name: 'Wash & Fold (Everyday Clothes)', pricingType: 'basket_size' };
+
+  let sizeDescription = 'Medium Basket (Standard Hamper · 2 baskets)';
+  if (sizeValue === 'small') sizeDescription = 'Small Basket (Single hamper · 1 basket)';
+  else if (sizeValue === 'medium') sizeDescription = 'Medium Basket (Standard hamper · 2 baskets)';
+  else if (sizeValue === 'large') sizeDescription = 'Family / Large Basket (3+ baskets)';
+  else if (sizeValue === 'single_item') sizeDescription = 'Specialty Individual Item (1 piece / pair)';
+  else if (sizeValue === 'multiple_items') sizeDescription = 'Specialty Individual Items (2-4 pieces / pairs)';
+
+  const isIndividual = ['sneakers', 'blankets', 'carpets', 'dry_clean'].includes(serviceKey) || sizeValue.includes('item');
+  const pricingModel = isIndividual 
+    ? 'Individually priced per item / pair by selected laundromat' 
+    : 'Billed on basket size by selected partner laundromat';
+
   if (!serviceKey || !sizeValue) {
-    if (priceDisplay) priceDisplay.textContent = '—';
-    if (weightDisplay) weightDisplay.textContent = 'Select options to estimate';
+    if (priceDisplay) priceDisplay.textContent = 'Priced by Laundromat';
+    if (weightDisplay) weightDisplay.textContent = 'Select service & basket size';
     if (bdLabel) bdLabel.textContent = '—';
-    if (bdSubtotal) bdSubtotal.textContent = '—';
-    if (bdDelivery) bdDelivery.textContent = '—';
-    if (bdVat) bdVat.textContent = '—';
-    if (bdTotal) bdTotal.textContent = '—';
-    if (btnPayPill) btnPayPill.textContent = '—';
-    pendingBooking.serviceKey = serviceKey;
-    pendingBooking.sizeValue = sizeValue;
-    pendingBooking.subtotal = 0.00;
-    pendingBooking.deliveryFee = 0.00;
-    pendingBooking.total = 0.00;
+    if (bdSubtotal) bdSubtotal.textContent = 'Priced by Laundromat';
+    if (bdDelivery) bdDelivery.textContent = 'Included with Partner Dispatch';
+    if (bdVat) bdVat.textContent = 'Basket Size Tariff Basis';
+    if (bdTotal) bdTotal.textContent = 'Laundromat Tariff';
+    if (btnPayPill) btnPayPill.textContent = 'Review Tariff';
     return;
   }
 
-  const sDef = SERVICE_RATES[serviceKey] || SERVICE_RATES['wash_fold'];
-  
-  let weightText = 'Up to 10kg (~22 lbs)';
-  let subtotal = 360.00;
+  // Selected laundromat details
+  const selOpt = laundromatSelect?.options[laundromatSelect.selectedIndex];
+  const lndName = selOpt?.getAttribute('data-name') || pendingBooking.laundromatName || '';
+  const lndCity = selOpt?.getAttribute('data-city') || pendingBooking.laundromatCity || '';
 
-  if (serviceKey === 'wash_fold') {
-    if (sizeValue === 'small') {
-      subtotal = 185.00;
-      weightText = 'Up to 5kg (~11 lbs)';
-    } else if (sizeValue === 'medium') {
-      subtotal = 360.00;
-      weightText = 'Up to 10kg (~22 lbs)';
-    } else {
-      subtotal = 680.00;
-      weightText = 'Up to 20kg (~44 lbs)';
-    }
-  } else if (serviceKey === 'dry_clean') {
-    const items = sizeValue === 'small' ? 4 : (sizeValue === 'medium' ? 8 : 16);
-    subtotal = items * sDef.rate;
-    weightText = `${items} tailored garments`;
-  } else if (serviceKey === 'iron_press') {
-    if (sizeValue === 'small') {
-      subtotal = 240.00;
-      weightText = 'Up to 5kg (~11 lbs) iron pressed';
-    } else if (sizeValue === 'medium') {
-      subtotal = 460.00;
-      weightText = 'Up to 10kg (~22 lbs) iron pressed';
-    } else {
-      subtotal = 880.00;
-      weightText = 'Up to 20kg (~44 lbs) iron pressed';
-    }
-  } else if (serviceKey === 'bedding') {
-    if (sizeValue === 'small') {
-      subtotal = 165.00;
-      weightText = '1 duvet & bedding bundle (Single/3-Quarter)';
-    } else if (sizeValue === 'medium') {
-      subtotal = 320.00;
-      weightText = '2 duvet & linen bundles (Double/Queen)';
-    } else {
-      subtotal = 475.00;
-      weightText = '3 duvet & sheet bundles (King/Feather)';
-    }
-  } else if (serviceKey === 'baby_clothes') {
-    if (sizeValue === 'small') {
-      subtotal = 190.00;
-      weightText = 'Up to 5kg baby clothes';
-    } else if (sizeValue === 'medium') {
-      subtotal = 380.00;
-      weightText = 'Up to 10kg baby clothes';
-    } else {
-      subtotal = 720.00;
-      weightText = 'Up to 20kg baby clothes';
-    }
-  } else if (serviceKey === 'express') {
-    if (sizeValue === 'small') {
-      subtotal = 240.00;
-      weightText = 'Up to 5kg (12h Rush)';
-    } else if (sizeValue === 'medium') {
-      subtotal = 480.00;
-      weightText = 'Up to 10kg (12h Rush)';
-    } else {
-      subtotal = 920.00;
-      weightText = 'Up to 20kg (12h Rush)';
-    }
+  if (priceDisplay) priceDisplay.textContent = 'Priced by Laundromat';
+  if (weightDisplay) weightDisplay.textContent = `${sizeDescription} · ${pricingModel}`;
+
+  if (bdLaundromat) {
+    bdLaundromat.textContent = lndName ? `${lndName} (${lndCity || 'Verified Partner'})` : 'Please Select Partner Laundromat';
   }
+  if (bdLabel) bdLabel.textContent = `${sDef.name} — ${sizeDescription}`;
+  if (bdSubtotal) bdSubtotal.textContent = 'Priced by Laundromat';
+  if (bdDelivery) {
+    bdDelivery.textContent = 'Included with Partner Dispatch';
+    bdDeliveryRow?.classList.add('delivery-free');
+  }
+  if (bdVat) bdVat.textContent = isIndividual ? 'Individually Priced per Item / Pair' : 'Billed on Basket Size Tariff';
+  if (bdTotal) bdTotal.textContent = 'Partner Laundromat Tariff';
+  if (btnPayPill) btnPayPill.textContent = 'Review & Book';
 
-  // Delivery fee calculation (Free over R350, else R45)
-  const deliveryFee = subtotal >= 350 ? 0.00 : 45.00;
-  const discount = pendingBooking.discount || 0.00;
-  const netTotal = Math.max(0, subtotal + deliveryFee - discount);
-  const vatAmount = (netTotal * 15 / 115);
+  if (bdDiscountRow) bdDiscountRow.style.display = 'none';
 
-  // Sync to state
   pendingBooking.serviceKey = serviceKey;
   pendingBooking.serviceName = sDef.name;
   pendingBooking.sizeValue = sizeValue;
-  pendingBooking.weightText = weightText;
-  pendingBooking.subtotal = subtotal;
-  pendingBooking.deliveryFee = deliveryFee;
-  pendingBooking.total = netTotal;
-
-  // Update hero preview display
-  if (priceDisplay) priceDisplay.textContent = `R${subtotal.toFixed(2)}`;
-  if (weightDisplay) weightDisplay.textContent = weightText;
-
-  // Update step 2 breakdown displays
-  if (bdLabel) bdLabel.textContent = `${sDef.name} (${weightText})`;
-  if (bdSubtotal) bdSubtotal.textContent = `R${subtotal.toFixed(2)}`;
-  if (bdDelivery) {
-    if (deliveryFee === 0) {
-      bdDelivery.textContent = 'FREE (Order > R350)';
-      bdDeliveryRow?.classList.add('delivery-free');
-    } else {
-      bdDelivery.textContent = `R${deliveryFee.toFixed(2)}`;
-      bdDeliveryRow?.classList.remove('delivery-free');
-    }
-  }
-
-  if (bdDiscountRow && bdDiscount) {
-    if (discount > 0) {
-      bdDiscountRow.style.display = 'flex';
-      bdDiscount.textContent = `-R${discount.toFixed(2)}`;
-    } else {
-      bdDiscountRow.style.display = 'none';
-    }
-  }
-
-  if (bdVat) bdVat.textContent = `R${vatAmount.toFixed(2)} (Included)`;
-  if (bdTotal) bdTotal.textContent = `R${netTotal.toFixed(2)}`;
-  if (btnPayPill) btnPayPill.textContent = `R${netTotal.toFixed(2)}`;
+  pendingBooking.weightText = sizeDescription;
+  pendingBooking.pricingModel = pricingModel;
+  pendingBooking.subtotal = 0;
+  pendingBooking.deliveryFee = 0;
+  pendingBooking.total = 0;
 }
 
 function goToBookingStep(step) {
   const addressInput = document.getElementById('pickupAddressInput');
+  const laundromatSelect = document.getElementById('pickupLaundromatSelect');
   const serviceSelect = document.getElementById('pickupServiceSelect');
   const sizeSelect = document.getElementById('pickupSizeSelect');
   const timeSelect = document.getElementById('pickupTimeSlotSelect');
@@ -618,6 +580,7 @@ function goToBookingStep(step) {
 
   const address = addressInput?.value.trim() || '';
   const unit = document.getElementById('pickupUnitInput')?.value.trim() || '';
+  const laundromatId = laundromatSelect?.value || '';
   const serviceKey = serviceSelect?.value || '';
   const sizeValue = sizeSelect?.value || '';
   const pickupTime = timeSelect?.value || '';
@@ -635,6 +598,17 @@ function goToBookingStep(step) {
       return;
     }
 
+    if (!laundromatId) {
+      showToast('Please select a partner laundromat to proceed.', 'error');
+      if (laundromatSelect) {
+        laundromatSelect.focus();
+        laundromatSelect.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        laundromatSelect.style.boxShadow = '0 0 0 3px rgba(239, 68, 68, 0.4)';
+        setTimeout(() => { laundromatSelect.style.boxShadow = ''; }, 1500);
+      }
+      return;
+    }
+
     if (!serviceKey) {
       showToast('Please select a service type.', 'error');
       if (serviceSelect) {
@@ -647,7 +621,7 @@ function goToBookingStep(step) {
     }
 
     if (!sizeValue) {
-      showToast('Please select a load size.', 'error');
+      showToast('Please select a basket size or item count.', 'error');
       if (sizeSelect) {
         sizeSelect.focus();
         sizeSelect.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -679,8 +653,12 @@ function goToBookingStep(step) {
       return;
     }
 
+    const selOpt = laundromatSelect.options[laundromatSelect.selectedIndex];
     pendingBooking.address = address;
     pendingBooking.unit = unit;
+    pendingBooking.laundromatId = laundromatId;
+    pendingBooking.laundromatName = selOpt?.getAttribute('data-name') || selOpt?.text?.split('·')[0]?.trim() || 'Selected Laundromat';
+    pendingBooking.laundromatCity = selOpt?.getAttribute('data-city') || '';
     pendingBooking.serviceKey = serviceKey;
     pendingBooking.sizeValue = sizeValue;
     pendingBooking.detergent = detergent;
@@ -739,6 +717,7 @@ function applyPromoCode() {
 
 function proceedToPayment() {
   const addressInput = document.getElementById('pickupAddressInput');
+  const laundromatSelect = document.getElementById('pickupLaundromatSelect');
   const serviceSelect = document.getElementById('pickupServiceSelect');
   const sizeSelect = document.getElementById('pickupSizeSelect');
   const timeSelect = document.getElementById('pickupTimeSlotSelect');
@@ -746,15 +725,23 @@ function proceedToPayment() {
 
   const address = addressInput?.value.trim() || '';
   const unit = document.getElementById('pickupUnitInput')?.value.trim() || '';
-  const serviceKey = serviceSelect?.value || '';
-  const sizeValue = sizeSelect?.value || '';
-  const pickupTime = timeSelect?.value || '';
-  const detergent = detergentSelect?.value || '';
+  const laundromatId = laundromatSelect?.value || pendingBooking.laundromatId || '';
+  const serviceKey = serviceSelect?.value || pendingBooking.serviceKey || '';
+  const sizeValue = sizeSelect?.value || pendingBooking.sizeValue || '';
+  const pickupTime = timeSelect?.value || pendingBooking.pickupTime || '';
+  const detergent = detergentSelect?.value || pendingBooking.detergent || '';
 
   if (!address) {
     showToast('Please enter your pickup address first.', 'error');
     goToBookingStep(1);
     addressInput?.focus();
+    return;
+  }
+
+  if (!laundromatId) {
+    showToast('Please select a partner laundromat first.', 'error');
+    goToBookingStep(1);
+    laundromatSelect?.focus();
     return;
   }
 
@@ -766,7 +753,7 @@ function proceedToPayment() {
   }
 
   if (!sizeValue) {
-    showToast('Please select a load size.', 'error');
+    showToast('Please select a basket size or item count.', 'error');
     goToBookingStep(1);
     sizeSelect?.focus();
     return;
@@ -786,6 +773,13 @@ function proceedToPayment() {
     return;
   }
 
+  if (laundromatSelect && laundromatSelect.selectedIndex >= 0) {
+    const selOpt = laundromatSelect.options[laundromatSelect.selectedIndex];
+    pendingBooking.laundromatId = laundromatId;
+    pendingBooking.laundromatName = selOpt?.getAttribute('data-name') || selOpt?.text?.split('·')[0]?.trim() || 'Selected Laundromat';
+    pendingBooking.laundromatCity = selOpt?.getAttribute('data-city') || '';
+  }
+
   pendingBooking.address = address;
   pendingBooking.unit = unit;
   pendingBooking.serviceKey = serviceKey;
@@ -799,24 +793,20 @@ function proceedToPayment() {
 
   // Check authentication requirement: "when paying the user must login or create an account"
   if (!currentUser || !authToken) {
-    // Show Auth Gate in Checkout Modal
     document.getElementById('checkoutAuthSection').style.display = 'block';
     document.getElementById('checkoutPaymentSection').style.display = 'none';
-    document.getElementById('checkoutModalTitle').textContent = 'Account Required to Book & Pay';
+    document.getElementById('checkoutModalTitle').textContent = 'Account Required to Book';
 
-    // Pre-populate signup address with the address user entered
     const signupAddress = document.getElementById('checkoutSignupAddress');
     if (signupAddress) {
       signupAddress.value = address + (unit ? `, ${unit}` : '');
     }
 
-    switchCheckoutAuthTab('signup'); // Default to sign up for new users
+    switchCheckoutAuthTab('signup');
   } else {
-    // Show Payment confirmation step
     showCheckoutPaymentStep();
   }
 
-  // Highlight pill step 3
   document.getElementById('pillStep1')?.classList.remove('active');
   document.getElementById('pillStep2')?.classList.remove('active');
   document.getElementById('pillStep3')?.classList.add('active');
@@ -831,9 +821,8 @@ function showCheckoutPaymentStep() {
 
   if (authSec) authSec.style.display = 'none';
   if (paySec) paySec.style.display = 'block';
-  if (title) title.textContent = 'Review Booking & Pay';
+  if (title) title.textContent = 'Review & Schedule Pickup';
 
-  // Fill in customer details
   const nameEl = document.getElementById('checkoutCustomerNameDisplay');
   const addrEl = document.getElementById('checkoutAddressDisplay');
   const slotEl = document.getElementById('checkoutSlotDisplay');
@@ -845,12 +834,11 @@ function showCheckoutPaymentStep() {
   if (nameEl) nameEl.textContent = currentUser ? `${currentUser.name} (${currentUser.phone})` : 'Registered Customer';
   if (addrEl) addrEl.textContent = pendingBooking.address + (pendingBooking.unit ? ` · ${pendingBooking.unit}` : '');
   if (slotEl) slotEl.textContent = pendingBooking.pickupTime;
-  if (srvEl) srvEl.textContent = `${pendingBooking.serviceName} (${pendingBooking.weightText})`;
+  if (srvEl) srvEl.textContent = `${pendingBooking.serviceName} (${pendingBooking.weightText}) · ${pendingBooking.laundromatName || 'Partner Laundromat'}`;
   if (detEl) detEl.textContent = pendingBooking.detergent;
 
-  const netTotalStr = `R${pendingBooking.total.toFixed(2)}`;
-  if (totalEl) totalEl.textContent = netTotalStr;
-  if (btnText) btnText.textContent = `Confirm & Pay ${netTotalStr}`;
+  if (totalEl) totalEl.textContent = 'Priced by Partner Laundromat';
+  if (btnText) btnText.textContent = `Confirm & Schedule Pickup with ${pendingBooking.laundromatName || 'Laundromat'}`;
 }
 
 function closeCheckoutModal() {
@@ -988,23 +976,26 @@ async function submitFinalPayment() {
     phone: currentUser.phone,
     pickupAddress: fullPickupAddress,
     serviceType: pendingBooking.serviceName,
+    laundromatId: pendingBooking.laundromatId || 'lnd_cpt_1',
+    laundromatName: pendingBooking.laundromatName || 'Kloof Street Laundromat & Garment Care',
+    basketSize: pendingBooking.weightText,
     bagCount: pendingBooking.sizeValue === 'small' ? 1 : (pendingBooking.sizeValue === 'medium' ? 2 : 3),
     estimatedWeight: pendingBooking.weightText,
     detergent: pendingBooking.detergent,
     specialInstructions: specialInstructions,
     pickupTime: pendingBooking.pickupTime,
     items: [
-      { name: `${pendingBooking.serviceName} (${pendingBooking.weightText})`, price: pendingBooking.subtotal }
+      { name: `${pendingBooking.serviceName} (${pendingBooking.weightText})`, price: 0 }
     ],
-    total: pendingBooking.total,
-    discount: pendingBooking.discount,
+    total: 0,
+    discount: 0,
     paymentMethod: selectedPaymentMethod
   };
 
   const btn = document.getElementById('btnFinalPaySubmit');
   if (btn) {
     btn.disabled = true;
-    btn.innerHTML = '<span>Processing payment...</span>';
+    btn.innerHTML = '<span>Scheduling pickup...</span>';
   }
 
   try {
@@ -1019,7 +1010,7 @@ async function submitFinalPayment() {
     const data = await res.json();
 
     if (res.ok && data.order) {
-      showToast(`Payment approved! Order ${data.order.id} booked.`, 'success');
+      showToast(`Pickup scheduled! Order ${data.order.id} booked with ${data.order.laundromatName || 'partner'}.`, 'success');
       closeCheckoutModal();
       goToBookingStep(1); // Reset widget
 
@@ -1030,14 +1021,14 @@ async function submitFinalPayment() {
       // Refresh database metrics
       loadOperationalStats();
     } else {
-      showToast(data.error || 'Payment could not be processed. Please try again.', 'error');
+      showToast(data.error || 'Pickup could not be scheduled. Please try again.', 'error');
     }
   } catch (err) {
-    showToast('Network error while completing payment.', 'error');
+    showToast('Network error while scheduling pickup.', 'error');
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> <span>Confirm &amp; Pay R${pendingBooking.total.toFixed(2)}</span>`;
+      btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> <span>Confirm &amp; Schedule Pickup</span>`;
     }
   }
 }
@@ -2031,92 +2022,113 @@ async function savePreferencesChange() {
    ========================================================================= */
 const SERVICE_CATALOG = {
   wash_fold: {
-    title: 'Wash & Fold (Weight-Based Pricing)',
-    badge: 'From R35 / kg',
-    desc: 'Our flagship laundry service for everyday clothing, tees, jeans, athleisure, socks, and bed linens. Sanitized individual wash drums with certified calibrated scales.',
+    title: 'Wash & Fold (Everyday Clothes)',
+    badge: 'Basket Size Tariff',
+    desc: 'Our flagship laundry service for everyday clothing, tees, jeans, athleisure, socks, and linens. Cleaned in dedicated drums and neatly folded. Tariffs are transparently set by your selected partner laundromat based on basket size.',
     pricingDetails: [
-      { label: 'Standard Laundry Bag (up to 5kg)', price: 'R175' },
-      { label: 'Family Laundry Bag (up to 10kg)', price: 'R350' },
-      { label: 'Bulk Laundry Bag (15kg+)', price: 'R35/kg' }
+      { label: 'Small Basket (Single hamper · 1 basket)', price: 'Priced by Laundromat' },
+      { label: 'Medium Basket (Standard hamper · 2 baskets)', price: 'Priced by Laundromat' },
+      { label: 'Family / Large Basket (3+ baskets)', price: 'Priced by Laundromat' }
     ],
     careOptions: [
       { title: 'Dye & Scent-Free Eco Detergent', desc: '100% plant-based hypoallergenic formulation ideal for eczema and allergy sufferers.' },
-      { title: 'Baby & Infant Gentle Rinse', desc: 'Extra thermal rinse cycle preserving soft baby cottons with zero harsh enzymes.' },
-      { title: 'Lights & Darks Separation', desc: 'Whites washed at 40°C with oxygen brightener; deep darks washed cold (30°C) to prevent fading.' },
-      { title: 'Standard or Rolling Fold', desc: 'Retail precision flat-fold or compact suitcase roll for business travelers.' }
+      { title: 'Lights & Darks Separation', desc: 'Whites washed with oxygen brightener; deep darks washed cold (30°C) to prevent fading.' },
+      { title: 'Standard or Rolling Fold', desc: 'Retail precision flat-fold or compact suitcase roll for travelers.' }
+    ]
+  },
+  sneakers: {
+    title: 'Sneakers & Footwear Deep Clean',
+    badge: 'Individual Pair Pricing',
+    desc: 'Specialty sneaker craftsmanship. Hand-scrubbed uppers, midsole detailing, sole brightening, interior deodorizing, and anti-bacterial sanitization. Individually priced per pair by the laundromat.',
+    pricingDetails: [
+      { label: 'Athletic & Running Sneakers (Per Pair)', price: 'Individually Priced by Laundromat' },
+      { label: 'Boutique Suede & Leather Kicks', price: 'Individually Priced by Laundromat' },
+      { label: 'Heavy Outdoor & Hiking Boots', price: 'Individually Priced by Laundromat' }
+    ],
+    careOptions: [
+      { title: 'Hand-Brush Material Care', desc: 'Soft bristle brushes on mesh and suede; stiff brushes on rubber outsoles.' },
+      { title: 'Odor Neutralization', desc: 'Non-toxic deep deodorizing and UV sanitized drying.' }
+    ]
+  },
+  blankets: {
+    title: 'Blankets, Duvets & Heavy Bedding',
+    badge: 'Individual Item Pricing',
+    desc: 'Large industrial commercial drum washing and thermal allergen sanitizing for winter blankets, duvets, down comforters, and throws. Individually priced per piece by the laundromat.',
+    pricingDetails: [
+      { label: 'Heavy Winter Blanket / Comforter', price: 'Individually Priced by Laundromat' },
+      { label: 'Single / 3-Quarter Bedding Set', price: 'Individually Priced by Laundromat' },
+      { label: 'King / Queen Down Feather Duvet', price: 'Individually Priced by Laundromat' }
+    ],
+    careOptions: [
+      { title: 'Thermal Sanitization Cycle', desc: 'Eliminates dust mites and seasonal allergens at certified temperatures.' },
+      { title: 'Feather & Down Fluffing', desc: 'Tumble agitation to maintain even fill distribution without clumping.' }
+    ]
+  },
+  carpets: {
+    title: 'Carpets & Area Rugs',
+    badge: 'Individual Item Pricing',
+    desc: 'Deep extraction cleaning, stain pretreatment, and odor neutralizing for hallway runners, living room carpets, and woven area rugs. Individually priced per carpet by your partner laundromat.',
+    pricingDetails: [
+      { label: 'Hallway Runner / Small Rug', price: 'Individually Priced by Laundromat' },
+      { label: 'Medium Living Room Carpet', price: 'Individually Priced by Laundromat' },
+      { label: 'Large Woven Area Rug', price: 'Individually Priced by Laundromat' }
+    ],
+    careOptions: [
+      { title: 'Fiber-Safe Pretreatment', desc: 'Targeted enzyme pretreatments for pet spots, beverage spills, and high-traffic dirt.' },
+      { title: 'Low-Moisture Extraction', desc: 'Fast drying extraction preventing mold, mildew, and fiber shrinkage.' }
     ]
   },
   dry_clean: {
-    title: 'Dry Cleaning & Boutique Fabric Care',
-    badge: 'From R85 / garment',
-    desc: 'Expert dry cleaning using modern, environmentally gentle hydrocarbon solvents. Perfect for bespoke suits, evening gowns, silk blouses, wool overcoats, and pleated skirts.',
+    title: 'Suits & Tailored Dry Cleaning',
+    badge: 'Individual Garment Pricing',
+    desc: 'Expert garment care using modern, environmentally gentle solvents. Bespoke suits, evening gowns, silk blouses, wool coats, and pleated skirts finished on precision steam forms.',
     pricingDetails: [
-      { label: '2-Piece Business Suit', price: 'R195' },
-      { label: 'Silk Blouse or Dress Shirt', price: 'R85' },
-      { label: 'Evening Dress / Gown', price: 'From R220' },
-      { label: 'Cashmere or Wool Knit Sweater', price: 'R115' }
+      { label: '2-Piece Business Suit', price: 'Individually Priced by Laundromat' },
+      { label: 'Silk Blouse or Dress Shirt', price: 'Individually Priced by Laundromat' },
+      { label: 'Evening Gown / Dress', price: 'Individually Priced by Laundromat' }
     ],
     careOptions: [
-      { title: 'Hand Steam Pressing', desc: 'Every garment is finished by hand using German precision steam forms.' },
-      { title: 'Wooden or Wire Hanger Packaging', desc: 'Delivered in breathable dust-protective poly covers ready for your closet.' },
-      { title: 'Stain Spot-Treatment', desc: 'Targeted enzyme removal for wine, oil, makeup, and coffee stains before solvent cleaning.' }
-    ]
-  },
-  bedding: {
-    title: 'Duvets, Blankets & Bulky Bedding',
-    badge: 'From R165 / bundle',
-    desc: 'Large commercial drum washing and high-temperature allergen removal for king, queen, and single duvets, feather pillows, and weighted blankets.',
-    pricingDetails: [
-      { label: 'King / Queen Down Duvet', price: 'R185' },
-      { label: 'Single / 3/4 Fiber Duvet', price: 'R165' },
-      { label: 'Thick Wool Blanket / Bedspread', price: 'R145' },
-      { label: 'Feather Pillow Sanitization (Pair)', price: 'R120' }
-    ],
-    careOptions: [
-      { title: 'Anti-Dust Mite Sanitization', desc: 'High-temperature thermal sanitizing eliminating 99.9% of dust mites and allergens.' },
-      { title: 'Even Down-Loft Tumble Drying', desc: 'Specialized wool dryer balls maintain uniform feather distribution without clumping.' }
+      { title: 'Hand Steam Pressing', desc: 'Finished by hand using precision tensioned steam forms.' },
+      { title: 'Closet Ready Packaging', desc: 'Delivered on wooden or heavy wire hangers with breathable dust covers.' }
     ]
   },
   iron_press: {
-    title: 'Wash & Steam Iron Pressing',
-    badge: 'From R46 / kg',
-    desc: 'Complete washing plus professional steam pressing. Collared dress shirts, linen trousers, blouses, and dresses hand-finished on hangers or crisp retail fold.',
+    title: 'Wash & Steam Table Press',
+    badge: 'Basket Size & Item Pricing',
+    desc: 'Complete washing plus professional steam table pressing. Work shirts, trousers, and linens hand-finished with sharp creases and zero wrinkles.',
     pricingDetails: [
-      { label: 'Collared Business Shirts (Per 5)', price: 'R140' },
-      { label: 'Linen Trousers & Chinos', price: 'R38 / item' },
-      { label: 'Full Load Wash & Press (10kg)', price: 'R460' }
+      { label: 'Full Basket Wash & Steam Press', price: 'Basket Size Tariff' },
+      { label: 'Collared Business Shirts (Per Item)', price: 'Individually Priced by Laundromat' }
     ],
     careOptions: [
-      { title: 'German Precision Steam Press', desc: 'Eliminates stubborn creases while protecting delicate fabric fibers.' },
-      { title: 'Closet Ready Delivery', desc: 'Packaged on wooden/wire hangers with protective poly covers.' }
+      { title: 'Precision Steam Press', desc: 'Eliminates stubborn creases while protecting delicate fabric fibers.' },
+      { title: 'Hanger or Retail Fold Finish', desc: 'Packaged on hangers or folded flat in structured garment bundles.' }
     ]
   },
   baby_clothes: {
-    title: 'Baby Clothes & Infant Hypoallergenic Care',
-    badge: 'From R38 / kg',
-    desc: 'Specialized ultra-gentle laundering for newborns, toddlers, and sensitive skin. Zero artificial dyes, zero harsh optical brighteners, and triple thermal rinse.',
+    title: 'Baby Clothes & Infant Care',
+    badge: 'Basket Size Tariff',
+    desc: 'Specialized gentle laundering for newborns, toddlers, and sensitive skin. Zero artificial dyes, zero harsh optical brighteners, and triple thermal rinse cycles.',
     pricingDetails: [
-      { label: 'Baby & Toddler Bundle (up to 5kg)', price: 'R190' },
-      { label: 'Crib Sheets & Swaddles (Set of 4)', price: 'R110' },
-      { label: 'Plush Toy Sanitization', price: 'R45 / toy' }
+      { label: 'Baby Laundry Small Basket', price: 'Basket Size Tariff' },
+      { label: 'Infant Bedding & Crib Sets', price: 'Individually Priced by Laundromat' }
     ],
     careOptions: [
       { title: 'Certified Plant-Based Detergent', desc: '100% biodegradable, hypoallergenic formula dermatologist approved.' },
-      { title: 'Triple Thermal Rinse', desc: 'Ensures zero soap residue remains in contact with delicate infant skin.' },
       { title: 'Sanitized Dedicated Wash Drum', desc: 'Never washed with outer garments or footwear.' }
     ]
   },
   express: {
-    title: 'Express Same-Day Rush Laundry',
-    badge: '12-Hour Turnaround',
-    desc: 'Need clean clothes in a hurry? Our Express Wash tier prioritizes your load at intake, washing, drying, and delivering within 12 hours.',
+    title: 'Express Same-Day Rush (12h)',
+    badge: 'Priority Expedited',
+    desc: 'Priority commercial wash, tumble dry, and fold with expedited dispatch within 12 hours from morning intake. Tariffs determined by partner laundromat.',
     pricingDetails: [
-      { label: 'Express Rush Surcharge', price: '+30% on standard rates' },
-      { label: 'Same-Day Morning Pickup (Before 09:00)', price: 'Delivered by 20:00 same evening' }
+      { label: 'Express Rush Basket', price: 'Expedited Partner Tariff' },
+      { label: 'Same-Day Return Dispatch', price: 'Coordinated with Courier Hub' }
     ],
     careOptions: [
       { title: 'Priority Dispatch Routing', desc: 'Dedicated courier allocation for expedited doorstep collection.' },
-      { title: 'SMS & Live Telemetry Tracking', desc: 'Direct live driver notifications with updated ETA and PIN verification.' }
+      { title: 'Live Progress Updates', desc: 'Direct driver notifications with updated ETA and PIN verification.' }
     ]
   }
 };
@@ -2511,9 +2523,7 @@ function renderRoute(path) {
   }
 
   if (path === '/book') {
-    if (!currentUser) {
-      renderBookingAuthGate();
-    } else if (typeof initBookingWizard === 'function') {
+    if (typeof initBookingWizard === 'function') {
       initBookingWizard();
     }
   }
@@ -2780,35 +2790,99 @@ const SERVICES_DATA = [
     key: 'wash_fold',
     title: 'Wash & Fold (Everyday Clothes)',
     category: 'wash_fold',
-    badge: 'Popular Everyday',
-    price: 36.00,
-    unit: 'per kg',
+    badge: 'Basket Size Tariff',
+    pricingModel: 'Priced by Laundromat · Basket Size Tariff',
     turnaround: '24 Hours Standard',
-    description: 'Clean everyday garments sorted by color, washed in a dedicated drum, tumble dried, and folded to retail perfection.',
+    description: 'Clean everyday garments sorted by color, washed in dedicated drums, tumble dried, and folded to retail perfection. Transparently priced by your selected partner laundromat based on basket size.',
     image: '/src/assets/images/wash_fold_clothes_1789125402839.jpg',
     whoFor: 'Busy professionals, families, students, and holiday travelers looking for effortless wardrobe care with guaranteed turnaround.',
     checklist: [
       'Zero Co-Mingling Guarantee: Dedicated commercial washer drum exclusively for your load',
       'Color Separation: Darks, lights, and whites sorted and washed in tailored batches',
-      'Certified Trade Scale Weighing with digital intake slip delivered to your account',
+      'Partner Laundromat Basket Intake with digital verification delivered to your account',
       '100% Biodegradable, hypoallergenic plant-based detergent safe for sensitive skin',
       'Temperature-controlled gentle tumble drying to preserve garment elasticity',
       'Crisp retail-style folding and moisture-resistant weather-sealed bundle packaging'
     ],
     care: 'We separate darks, whites, and colors before cycle intake. Wash temperature defaults to 30°C eco-cold to prevent shrinkage and color bleeding.',
     faqs: [
-      { q: 'What is the minimum order size for Wash & Fold?', a: 'There is no minimum weight requirement. A nominal R45 courier fee applies to orders below R350; all orders over R350 qualify for 100% FREE doorstep pickup and return delivery.' },
-      { q: 'How is the weight determined?', a: 'Your laundry is weighed at intake on certified, sealed trade scales. You receive a digital weighing slip on your account before washing begins.' }
+      { q: 'What is the minimum order size for Wash & Fold?', a: 'There is no arbitrary minimum load size. Partner laundromats price everyday laundry by standard basket size (Small, Medium, Large, or Family Hamper) so you never need a scale at home.' },
+      { q: 'How does basket size pricing work?', a: 'Choose your estimated basket size or individual items when booking. Your selected partner laundromat confirms your basket load upon collection, ensuring total transparency.' }
+    ]
+  },
+  {
+    slug: 'sneakers',
+    key: 'sneakers',
+    title: 'Sneakers & Footwear Deep Clean',
+    category: 'sneakers',
+    badge: 'Individual Pair Pricing',
+    pricingModel: 'Priced by Laundromat · Individual Pair Rates',
+    turnaround: '24–36 Hours Standard',
+    description: 'Specialty sneaker craftsmanship. Hand-scrubbed upper materials, sole brightening, interior deodorizing, and anti-bacterial sanitizing for athletic, leather, and casual footwear.',
+    image: '/src/assets/images/dry_clean_garments_1789125413572.jpg',
+    whoFor: 'Sneaker enthusiasts, runners, gym-goers, and professionals wanting immaculate footwear restoration without risk of drum abrasion.',
+    checklist: [
+      'Multi-stage hand-scrub with material-specific gentle cleansers',
+      'Midsole scrubbing and sole brightening revival treatment',
+      'Lace soak, hand wash, and delicate fabric re-conditioning',
+      'Odor neutralizing anti-bacterial sanitization and moisture-controlled dry'
+    ],
+    care: 'Never machine-washed. Hand-detailed to preserve adhesives, stitching, suede texture, and upper shape.',
+    faqs: [
+      { q: 'Can you clean suede and mesh sneakers?', a: 'Yes! Our partner craftsmen use specialized soft horsehair brushes and moisture-controlled cleaners tailored specifically for delicate suede and mesh fabrics.' }
+    ]
+  },
+  {
+    slug: 'blankets',
+    key: 'blankets',
+    title: 'Blankets, Duvets & Heavy Bedding',
+    category: 'bedding',
+    badge: 'Individual Item Pricing',
+    pricingModel: 'Priced by Laundromat · Individually Priced',
+    turnaround: '36 Hours Standard',
+    description: 'High-capacity commercial sanitizing for winter blankets, down comforters, duvets, and throws. Individually priced per blanket or duvet by your chosen partner laundromat.',
+    image: '/src/assets/images/commercial_laundry_business_1789125441255.jpg',
+    whoFor: 'Homeowners and Airbnb hosts wanting seasonal freshening or hypoallergenic deep cleaning of heavy bed sets and winter blankets.',
+    checklist: [
+      'High-capacity 25kg commercial sanitizing drum',
+      'Dust mite allergen removal at 60°C thermal rinse',
+      'Feather and down fluffing cycle with tennis-ball agitation',
+      'Breathable zip-up storage bag packaging for dust-free storage'
+    ],
+    care: 'Feather duvets are dried completely to prevent mildew and odor with low-temperature extended tumble cycles.',
+    faqs: [
+      { q: 'Do you clean king size feather duvets and heavy winter blankets?', a: 'Yes, our partner laundromats operate oversized 25kg+ commercial washers specifically designed for bulky bedding.' }
+    ]
+  },
+  {
+    slug: 'carpets',
+    key: 'carpets',
+    title: 'Carpets & Area Rugs',
+    category: 'carpets',
+    badge: 'Individual Item Pricing',
+    pricingModel: 'Priced by Laundromat · Individually Priced',
+    turnaround: '48 Hours Deep Care',
+    description: 'Deep extraction cleaning, stain removal, and odor elimination for hallway runners, living room carpets, and woven area rugs. Individually priced per carpet.',
+    image: '/src/assets/images/commercial_laundry_business_1789125441255.jpg',
+    whoFor: 'Homeowners, pet owners, and offices needing deep extraction carpet hygiene and stain elimination.',
+    checklist: [
+      'High-power fiber particulate vacuuming and dust extraction',
+      'Targeted enzyme pre-treatment for stubborn spills and pet spots',
+      'Deep steam wash extraction with anti-microbial fabric rinse',
+      'Climate-controlled drying preventing mold and fiber shrinkage'
+    ],
+    care: 'Colors are tested for fastness prior to cycle commencement. Wool and delicate weaves receive pH-neutral care.',
+    faqs: [
+      { q: 'How are carpets priced?', a: 'Carpets and rugs are individually evaluated and priced based on square dimensions and fabric type by your selected partner laundromat.' }
     ]
   },
   {
     slug: 'dry-cleaning',
     key: 'dry_clean',
-    title: 'Dry Cleaning & Tailored Garments',
+    title: 'Suits & Tailored Dry Cleaning',
     category: 'dry_clean',
-    badge: 'Garment Artisan',
-    price: 85.00,
-    unit: 'per item',
+    badge: 'Individual Garment Pricing',
+    pricingModel: 'Priced by Laundromat · Individually Priced',
     turnaround: '36 Hours Standard',
     description: 'Delicate fabrics, business suits, evening wear, and silks treated with non-toxic solvents and finished on high-precision steam forms.',
     image: '/src/assets/images/dry_clean_garments_1789125413572.jpg',
@@ -2818,8 +2892,7 @@ const SERVICES_DATA = [
       'Non-toxic eco solvent cycle that prevents fabric fading and fiber weakening',
       'Hand inspection of buttons, hems, zippers, and lining seams',
       'Tensioned steam table finishing and contour collar shaping',
-      'Complimentary garment hangers and breathable protective dust covers',
-      'Backed by our Garment Care Warranty up to R1,500 per piece'
+      'Complimentary garment hangers and breathable protective dust covers'
     ],
     care: 'All garments follow strict care-label specifications. Leather, suede, and intricate beadwork receive specialized dry extraction.',
     faqs: [
@@ -2831,9 +2904,8 @@ const SERVICES_DATA = [
     key: 'iron_press',
     title: 'Wash & Steam Table Press',
     category: 'iron_press',
-    badge: 'Executive Finish',
-    price: 46.00,
-    unit: 'per kg',
+    badge: 'Basket Size & Garment Pricing',
+    pricingModel: 'Priced by Laundromat · Basket Size & Item Rates',
     turnaround: '24 Hours Standard',
     description: 'Work shirts, trousers, and linens washed, steam-pressed, and hand-finished with sharp creases and zero wrinkles.',
     image: '/src/assets/images/laundry_doorstep_delivery_1789125425504.jpg',
@@ -2847,30 +2919,7 @@ const SERVICES_DATA = [
     ],
     care: 'Steam temperatures are adjusted by fabric composition (cotton 200°C, synthetics 140°C, silks cool steam).',
     faqs: [
-      { q: 'Can I choose between hangers and folded?', a: 'Yes, select your folding/hanging preference in the booking wizard step 6.' }
-    ]
-  },
-  {
-    slug: 'duvets-and-bedding',
-    key: 'bedding',
-    title: 'Duvets, Blankets & Bedding Bundles',
-    category: 'bedding',
-    badge: 'Deep Sanitized',
-    price: 165.00,
-    unit: 'per bundle',
-    turnaround: '36 Hours Standard',
-    description: 'Large-capacity industrial sanitizing for king and queen down duvets, comforters, woolen blankets, and heavy bedspreads.',
-    image: '/src/assets/images/commercial_laundry_business_1789125441255.jpg',
-    whoFor: 'Homeowners and Airbnb hosts wanting seasonal freshening or hypoallergenic deep cleaning of heavy bed sets and winter blankets.',
-    checklist: [
-      'High-capacity 25kg commercial sanitizing drum',
-      'Dust mite allergen removal at 60°C thermal rinse',
-      'Feather and down fluffing cycle with tennis-ball agitation',
-      'Breathable zip-up storage bag packaging for dust-free storage'
-    ],
-    care: 'Feather duvets are dried completely to prevent mildew and odor with low-temperature extended tumble cycles.',
-    faqs: [
-      { q: 'Do you clean king size feather duvets?', a: 'Yes, our 25kg commercial washers easily handle oversized king and super-king duvets.' }
+      { q: 'Can I choose between hangers and folded?', a: 'Yes, select your folding/hanging preference in the booking wizard.' }
     ]
   },
   {
@@ -2878,9 +2927,8 @@ const SERVICES_DATA = [
     key: 'baby_clothes',
     title: 'Infant & Sensitive Skin Care',
     category: 'baby_clothes',
-    badge: '100% Dermatological',
-    price: 38.00,
-    unit: 'per kg',
+    badge: 'Basket Size Tariff',
+    pricingModel: 'Priced by Laundromat · Basket Size Tariff',
     turnaround: '24 Hours Standard',
     description: 'Hypoallergenic, fragrance-free, dermatologically tested washing with triple freshwater rinse cycles for babies and sensitive skin.',
     image: '/src/assets/images/wash_fold_clothes_1789125402839.jpg',
@@ -2902,9 +2950,8 @@ const SERVICES_DATA = [
     key: 'express',
     title: 'Express Rush (Same-Day 12h)',
     category: 'express',
-    badge: 'Priority Dispatch',
-    price: 48.00,
-    unit: 'per kg',
+    badge: 'Priority Expedited',
+    pricingModel: 'Priced by Laundromat · Expedited Tariff',
     turnaround: '12 Hours Express',
     description: 'Priority commercial wash, tumble dry, and fold with expedited dispatch within 12 hours from morning intake.',
     image: '/src/assets/images/wash_fold_clothes_1789125402839.jpg',
@@ -2935,8 +2982,8 @@ function initServicesCatalog() {
         <span class="chip" style="position:absolute; top:12px; left:12px; font-size:11px;">${s.badge}</span>
       </div>
       <div class="service-card-content">
-        <div class="service-price-tag">
-          R${s.price.toFixed(2)} <span>/ ${s.unit}</span>
+        <div class="service-price-tag" style="font-size:13.5px; font-weight:700; color:var(--teal-600); margin-bottom:8px;">
+          ${escapeHtml(s.pricingModel)}
         </div>
         <h3 class="service-card-title">${escapeHtml(s.title)}</h3>
         <p class="service-card-desc">${escapeHtml(s.description)}</p>
@@ -2996,7 +3043,8 @@ function renderServiceDetailPage(slug) {
   }
   if (whoFor) whoFor.textContent = service.whoFor;
   if (care) care.textContent = service.care;
-  if (priceDisplay) priceDisplay.innerHTML = `R${service.price.toFixed(2)} <span>/ ${service.unit} (incl. VAT)</span>`;
+  if (priceDisplay) priceDisplay.innerHTML = `${escapeHtml(service.pricingModel)} <span style="display:block; font-size:12.5px; font-weight:500; color:var(--slate-500); margin-top:4px;">Tariff certified upon facility intake</span>`;
+  if (turnaroundVal) turnaroundVal.textContent = service.turnaround;
   if (turnaroundVal) turnaroundVal.textContent = service.turnaround;
 
   if (checklist) {
@@ -3084,8 +3132,8 @@ const FULL_FAQS = [
     a: 'We strictly guarantee that your clothes are never washed, dried, or handled together with anyone else’s laundry. Every single customer order is processed in its own dedicated, sanitized commercial drum from intake to folding.'
   },
   {
-    q: 'How is the weight calculated, and what if I do not have a scale?',
-    a: 'You do not need to weigh your laundry before pickup! Our online estimator gives you an approximate estimate. When your bag arrives at our intake hub, it is placed on South African trade-certified, calibrated digital scales. An automated digital intake slip with the certified weight is instantly saved to your account.'
+    q: 'How does laundromat pricing work, and do you charge by weight?',
+    a: 'Most partner laundromats charge by basket size (Small Basket, Medium Basket, Large Basket, or Family Hamper) for everyday clothing, and use individual item pricing for specialty items like sneakers, blankets/duvets, and carpets. You do not need a scale at home! When booking pickup or delivery, you simply select your preferred local partner laundromat and choose your basket size or individual items. The laundromat applies their transparent tariff, and an itemized breakdown is confirmed upon collection.'
   },
   {
     q: 'What are the delivery fees and minimum order amounts?',
@@ -3170,27 +3218,23 @@ function updateCommercialCalc(val) {
   const freqVal = document.getElementById('calcFreqVal');
   const costVal = document.getElementById('calcCostVal');
 
-  if (display) display.textContent = `${weight} kg / week`;
+  const approxBaskets = Math.max(2, Math.round(weight / 8));
+  if (display) display.textContent = `~${approxBaskets} Baskets / week (Commercial Volume)`;
 
-  let ratePerKg = 32.00;
-  let tierName = 'Tier 1 Hospitality (R32/kg)';
+  let tierName = 'Tier 1 Boutique · Weekly Scheduled Route';
   let frequency = '2x Scheduled Pickups / wk';
 
   if (weight >= 300) {
-    ratePerKg = 25.00;
-    tierName = 'Tier 3 Enterprise (R25/kg)';
+    tierName = 'Tier 3 Enterprise · High-Volume Dedicated Fleet';
     frequency = 'Daily Dedicated Dispatch (6x/wk)';
   } else if (weight >= 100) {
-    ratePerKg = 29.00;
-    tierName = 'Tier 2 Commercial (R29/kg)';
+    tierName = 'Tier 2 Commercial · Multi-Basket Scheduled Route';
     frequency = '3x Scheduled Pickups / wk';
   }
 
-  const monthlyEst = weight * 4 * ratePerKg;
-
   if (tierVal) tierVal.textContent = tierName;
   if (freqVal) freqVal.textContent = frequency;
-  if (costVal) costVal.textContent = `R${monthlyEst.toLocaleString()} / mo`;
+  if (costVal) costVal.textContent = 'Partner Laundromat Volume Tariff';
 }
 
 async function handleBusinessInquirySubmit(e) {
@@ -3250,14 +3294,82 @@ async function handleContactHubSubmit(e) {
 }
 
 /* =========================================================================
-   8-STEP BOOKING WIZARD CONTROLLER
+   8-STEP BOOKING WIZARD CONTROLLER (BASKET SIZE & PARTNER LAUNDROMATS)
    ========================================================================= */
+const DEFAULT_PARTNERS = [
+  {
+    id: "lnd_cpt_1",
+    businessName: "Kloof Street Laundromat & Garment Care",
+    city: "Cape Town",
+    suburb: "Gardens & City Bowl",
+    rating: 4.9,
+    turnaround: "24 Hours Standard",
+    specialties: "Everyday Wash & Fold, Sneakers Care, Sensitive Wash",
+    pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets"
+  },
+  {
+    id: "lnd_cpt_2",
+    businessName: "Atlantic Seaboard Laundry Hub",
+    city: "Cape Town",
+    suburb: "Sea Point, Camps Bay & Green Point",
+    rating: 4.8,
+    turnaround: "Same-Day & 24h",
+    specialties: "Airbnb Linens, Blankets & Duvets, Carpets & Rugs",
+    pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets"
+  },
+  {
+    id: "lnd_jhb_1",
+    businessName: "Rosebank Master Laundromat & Dry Cleaners",
+    city: "Johannesburg",
+    suburb: "Rosebank, Parkhurst & Houghton",
+    rating: 4.9,
+    turnaround: "24 Hours Standard",
+    specialties: "Suits & Dry Cleaning, Sneakers Deep Clean, Wash & Fold",
+    pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets"
+  },
+  {
+    id: "lnd_jhb_2",
+    businessName: "Sandton Elite Laundry & Commercial Wash",
+    city: "Johannesburg",
+    suburb: "Sandton, Morningside & Bryanston",
+    rating: 4.9,
+    turnaround: "12h Express & 24h Standard",
+    specialties: "Executive Shirts, Blankets & Duvets, Carpets & Area Rugs",
+    pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets"
+  },
+  {
+    id: "lnd_dbn_1",
+    businessName: "Umhlanga Ridge Laundromat",
+    city: "Durban / eThekwini",
+    suburb: "Umhlanga, Durban North & La Lucia",
+    rating: 4.8,
+    turnaround: "24 Hours Standard",
+    specialties: "Holiday Linens, Blankets, Sneakers, Wash & Fold",
+    pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets"
+  },
+  {
+    id: "lnd_pta_1",
+    businessName: "Pretoria East Gentle Laundry & Press",
+    city: "Pretoria / Tshwane",
+    suburb: "Menlyn, Brooklyn & Faerie Glen",
+    rating: 4.9,
+    turnaround: "24 Hours Standard",
+    specialties: "Steam Press, Hypoallergenic Wash, Blankets & Duvets",
+    pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets"
+  }
+];
+
 let wizardState = {
   currentStep: 1,
-  serviceKey: '',
-  weightOrItems: 10,
+  serviceKey: 'wash_fold',
+  basketSize: 'medium',
+  basketSizeLabel: 'Medium Basket (~2 Baskets · 2-3 persons load)',
+  itemCount: 2,
+  laundromatId: 'lnd_cpt_1',
+  laundromatName: 'Kloof Street Laundromat & Garment Care',
+  laundromatCity: 'Cape Town',
   address: '',
-  suburb: '',
+  suburb: 'Cape Town',
   gateCode: '',
   pickupDate: 'today',
   customDate: '',
@@ -3271,14 +3383,18 @@ let wizardState = {
 };
 
 function initBookingWizard() {
-  if (!currentUser) {
-    renderBookingAuthGate();
-    return;
-  }
-  if (currentUser && currentUser.address) {
+  if (currentUser && currentUser.address && !wizardState.address) {
     wizardState.address = currentUser.address;
   }
-  renderWizardStep(1);
+  if (!wizardState.serviceKey) {
+    wizardState.serviceKey = 'wash_fold';
+  }
+  if (!wizardState.laundromatId) {
+    wizardState.laundromatId = 'lnd_cpt_1';
+    wizardState.laundromatName = 'Kloof Street Laundromat & Garment Care';
+    wizardState.laundromatCity = 'Cape Town';
+  }
+  renderWizardStep(wizardState.currentStep || 1);
 }
 
 function updateWizardStepIndicators(step) {
@@ -3295,6 +3411,24 @@ function updateWizardStepIndicators(step) {
   });
 }
 
+function wizardCalculatePricing() {
+  const isIndividual = ['sneakers', 'blankets', 'carpets', 'dry_clean'].includes(wizardState.serviceKey);
+  let subtotal = 0;
+  if (isIndividual) {
+    const rateMap = { sneakers: 125, blankets: 130, carpets: 180, dry_clean: 115 };
+    const perItem = rateMap[wizardState.serviceKey] || 120;
+    subtotal = Math.max(1, wizardState.itemCount || 1) * perItem;
+  } else {
+    const basketMap = { small: 140, medium: 220, large: 310, family: 430 };
+    subtotal = basketMap[wizardState.basketSize] || 220;
+  }
+  const deliveryFee = subtotal >= 350 ? 0.00 : 45.00;
+  const discount = wizardState.discountAmount || 0;
+  const total = Math.max(0, subtotal + deliveryFee - discount);
+  const vatAmount = total * (15 / 115);
+  return { subtotal, deliveryFee, discount, total, vatAmount, isIndividual };
+}
+
 function renderWizardStep(step) {
   wizardState.currentStep = step;
   updateWizardStepIndicators(step);
@@ -3303,9 +3437,10 @@ function renderWizardStep(step) {
   if (!container) return;
 
   const currentService = SERVICES_DATA.find(s => s.key === wizardState.serviceKey) || SERVICES_DATA[0];
-
+  const pricing = wizardCalculatePricing();
   let html = '';
 
+  // STEP 1: SERVICE
   if (step === 1) {
     html = `
       <div style="margin-bottom:24px;">
@@ -3314,67 +3449,153 @@ function renderWizardStep(step) {
         <p style="color:var(--text-secondary); font-size:14px;">Select the primary laundry treatment required for your pickup.</p>
       </div>
 
-      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:14px; margin-bottom:32px;">
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:14px; margin-bottom:32px;">
         ${SERVICES_DATA.map(s => `
           <div class="service-card-full ${wizardState.serviceKey === s.key ? 'selected-service-card' : ''}" 
-               style="cursor:pointer; padding:18px; border:2px solid ${wizardState.serviceKey === s.key ? 'var(--ink)' : 'var(--border)'};"
+               style="cursor:pointer; padding:18px; border:2px solid ${wizardState.serviceKey === s.key ? 'var(--ink)' : 'var(--border)'}; position:relative;"
                onclick="wizardSelectService('${s.key}')">
             <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px;">
-              <span class="chip" style="font-size:10px;">${s.badge}</span>
-              <strong style="color:var(--ink); font-size:15px;">R${s.price.toFixed(2)}</strong>
+              <span class="chip" style="font-size:10px;">${escapeHtml(s.badge)}</span>
+              ${wizardState.serviceKey === s.key ? '<span style="color:var(--emerald-600); font-weight:700; font-size:13px;">✓ Selected</span>' : ''}
             </div>
-            <h4 style="font-size:15px; margin-bottom:4px;">${escapeHtml(s.title)}</h4>
-            <p style="font-size:12px; color:var(--text-secondary); line-height:1.4;">${escapeHtml(s.description)}</p>
+            <h4 style="font-size:15px; margin-bottom:4px; color:var(--ink);">${escapeHtml(s.title)}</h4>
+            <p style="font-size:12px; color:var(--text-secondary); line-height:1.4; margin-bottom:8px;">${escapeHtml(s.description)}</p>
+            <div style="font-size:11.5px; font-weight:600; color:var(--teal-600);">${escapeHtml(s.pricingModel)}</div>
           </div>
         `).join('')}
       </div>
 
       <div style="display:flex; justify-content:flex-end;">
-        <button class="btn btn-solid" onclick="wizardNext()">Continue: Set Load &amp; Weight &rarr;</button>
+        <button class="btn btn-solid" onclick="wizardNext()">Continue: Basket &amp; Load Selection &rarr;</button>
       </div>
     `;
-  } else if (step === 2) {
-    const isItemUnit = currentService.unit.includes('item') || currentService.unit.includes('bundle');
-    const unitLabel = isItemUnit ? 'items / bundles' : 'kilograms (kg)';
-    const defaultVal = wizardState.weightOrItems || (isItemUnit ? 4 : 10);
+  }
+  // STEP 2: BASKET / ITEM LOAD
+  else if (step === 2) {
+    const isIndividual = pricing.isIndividual;
+    let itemLabel = 'items';
+    if (wizardState.serviceKey === 'sneakers') itemLabel = 'pairs of sneakers';
+    else if (wizardState.serviceKey === 'blankets') itemLabel = 'blankets / duvets';
+    else if (wizardState.serviceKey === 'carpets') itemLabel = 'carpets / area rugs';
+    else if (wizardState.serviceKey === 'dry_clean') itemLabel = 'suits / tailored garments';
 
     html = `
       <div style="margin-bottom:24px;">
         <span class="chip" style="font-size:11px;">STEP 2 OF 8</span>
-        <h2 style="margin:8px 0 4px; font-size:22px;">Estimate Your Load Size</h2>
-        <p style="color:var(--text-secondary); font-size:14px;">Don't worry if it's not exact — our intake scales certify official weight upon arrival.</p>
+        <h2 style="margin:8px 0 4px; font-size:22px;">Select Basket Size or Load Quantity</h2>
+        <p style="color:var(--text-secondary); font-size:14px;">No home scales required! Partner laundromats set transparent rates by standard basket size or individual items.</p>
       </div>
 
-      <div style="background:var(--surface-soft); border-radius:var(--r-card); padding:24px; margin-bottom:28px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-          <span style="font-weight:700; font-size:16px;">Estimated ${unitLabel}:</span>
-          <span id="wizardWeightDisplay" style="color:var(--ink); font-weight:700; font-size:22px;">${defaultVal} ${unitLabel}</span>
-        </div>
+      ${!isIndividual ? `
+        <!-- Basket Size Choices -->
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:14px; margin-bottom:28px;">
+          <div class="service-card-full ${wizardState.basketSize === 'small' ? 'selected-service-card' : ''}"
+               style="cursor:pointer; padding:20px; border:2px solid ${wizardState.basketSize === 'small' ? 'var(--ink)' : 'var(--border)'}; text-align:center;"
+               onclick="wizardSelectBasketSize('small', 'Small Basket (~1 Basket · 1-2 persons load)')">
+            <div style="font-size:28px; margin-bottom:6px;">🧺</div>
+            <strong style="font-size:16px; display:block; color:var(--ink);">Small Basket</strong>
+            <div style="font-size:12.5px; color:var(--text-secondary); margin:4px 0 10px;">~1 Basket · 1-2 Persons<br>(Daily light wash)</div>
+            <div style="font-weight:700; color:var(--teal-600); font-size:14px;">Est. Tariff ~R140.00</div>
+          </div>
 
-        <input type="range" min="${isItemUnit ? 1 : 3}" max="${isItemUnit ? 25 : 60}" step="1" value="${defaultVal}" 
-               style="width:100%; accent-color:#000000; margin-bottom:18px;" 
-               oninput="wizardSetWeight(this.value, '${unitLabel}')">
+          <div class="service-card-full ${wizardState.basketSize === 'medium' ? 'selected-service-card' : ''}"
+               style="cursor:pointer; padding:20px; border:2px solid ${wizardState.basketSize === 'medium' ? 'var(--ink)' : 'var(--border)'}; text-align:center; position:relative;"
+               onclick="wizardSelectBasketSize('medium', 'Medium Basket (~2 Baskets · 2-3 persons load)')">
+            <span class="chip chip-emerald" style="position:absolute; top:8px; right:8px; font-size:9.5px;">POPULAR</span>
+            <div style="font-size:28px; margin-bottom:6px;">🧺🧺</div>
+            <strong style="font-size:16px; display:block; color:var(--ink);">Medium Basket</strong>
+            <div style="font-size:12.5px; color:var(--text-secondary); margin:4px 0 10px;">~2 Baskets · 2-3 Persons<br>(Standard weekly wash)</div>
+            <div style="font-weight:700; color:var(--teal-600); font-size:14px;">Est. Tariff ~R220.00</div>
+          </div>
 
-        <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text-secondary);">
-          <span>${isItemUnit ? '1 item' : '3 kg (Small Basket)'}</span>
-          <span>${isItemUnit ? '12 items' : '15 kg (Family Hamper)'}</span>
-          <span>${isItemUnit ? '25 items' : '60 kg (Commercial Load)'}</span>
+          <div class="service-card-full ${wizardState.basketSize === 'large' ? 'selected-service-card' : ''}"
+               style="cursor:pointer; padding:20px; border:2px solid ${wizardState.basketSize === 'large' ? 'var(--ink)' : 'var(--border)'}; text-align:center;"
+               onclick="wizardSelectBasketSize('large', 'Large Basket (~3 Baskets · 3-4 persons load)')">
+            <div style="font-size:28px; margin-bottom:6px;">🧺🧺🧺</div>
+            <strong style="font-size:16px; display:block; color:var(--ink);">Large Basket</strong>
+            <div style="font-size:12.5px; color:var(--text-secondary); margin:4px 0 10px;">~3 Baskets · 3-4 Persons<br>(Active family load)</div>
+            <div style="font-weight:700; color:var(--teal-600); font-size:14px;">Est. Tariff ~R310.00</div>
+          </div>
+
+          <div class="service-card-full ${wizardState.basketSize === 'family' ? 'selected-service-card' : ''}"
+               style="cursor:pointer; padding:20px; border:2px solid ${wizardState.basketSize === 'family' ? 'var(--ink)' : 'var(--border)'}; text-align:center;"
+               onclick="wizardSelectBasketSize('family', 'Family Hamper (~4+ Baskets · heavy bulk load)')">
+            <div style="font-size:28px; margin-bottom:6px;">📦</div>
+            <strong style="font-size:16px; display:block; color:var(--ink);">Family Hamper</strong>
+            <div style="font-size:12.5px; color:var(--text-secondary); margin:4px 0 10px;">4+ Baskets Bulk<br>(Heavy linen or family wash)</div>
+            <div style="font-weight:700; color:var(--teal-600); font-size:14px;">Est. Tariff ~R430.00</div>
+          </div>
         </div>
-      </div>
+      ` : `
+        <!-- Specialty Individual Items Stepper -->
+        <div style="background:var(--surface-soft); border-radius:var(--r-card); padding:28px; margin-bottom:28px; text-align:center; border:1px solid var(--border);">
+          <div style="font-size:13px; text-transform:uppercase; font-weight:700; color:var(--slate-500); letter-spacing:0.05em; margin-bottom:8px;">Specialty Individual Item Pricing</div>
+          <h3 style="font-size:20px; margin-bottom:16px; color:var(--ink);">How many ${itemLabel} to clean?</h3>
+
+          <div style="display:inline-flex; align-items:center; gap:20px; background:var(--white); border:2px solid var(--border); border-radius:var(--r-full); padding:8px 24px; margin-bottom:16px;">
+            <button type="button" class="btn btn-ghost" style="font-size:24px; padding:4px 12px; line-height:1;" onclick="wizardSetItemCount(-1)">−</button>
+            <span style="font-size:28px; font-weight:700; color:var(--ink); min-width:40px;">${wizardState.itemCount}</span>
+            <button type="button" class="btn btn-ghost" style="font-size:24px; padding:4px 12px; line-height:1;" onclick="wizardSetItemCount(1)">+</button>
+          </div>
+
+          <div style="font-size:15px; font-weight:600; color:var(--teal-600);">
+            ${wizardState.itemCount} ${itemLabel} · Est. Tariff: R${pricing.subtotal.toFixed(2)}
+          </div>
+        </div>
+      `}
 
       <div class="service-spec-box" style="margin-bottom:28px;">
         <div class="spec-item">
           <span class="spec-label">Selected Service</span>
-          <span class="spec-val">${escapeHtml(currentService.title)}</span>
+          <span class="spec-val"><strong>${escapeHtml(currentService.title)}</strong></span>
         </div>
         <div class="spec-item">
-          <span class="spec-label">Rate per Unit</span>
-          <span class="spec-val">R${currentService.price.toFixed(2)} / ${currentService.unit}</span>
+          <span class="spec-label">Pricing Structure</span>
+          <span class="spec-val">${isIndividual ? 'Individual Item Pricing' : 'Transparent Basket Size Tariff'}</span>
         </div>
         <div class="spec-item">
           <span class="spec-label">Estimated Service Subtotal</span>
-          <span class="spec-val" id="wizardSubtotalVal" style="font-weight:700; color:var(--ink);">R${(defaultVal * currentService.price).toFixed(2)}</span>
+          <span class="spec-val" style="font-weight:700; color:var(--ink);">R${pricing.subtotal.toFixed(2)}</span>
         </div>
+      </div>
+
+      <div style="display:flex; justify-content:space-between;">
+        <button class="btn btn-outline" onclick="wizardPrev()">&larr; Back</button>
+        <button class="btn btn-solid" onclick="wizardNext()">Continue: Select Partner Laundromat &rarr;</button>
+      </div>
+    `;
+  }
+  // STEP 3: LAUNDROMAT (PARTNER SELECTION)
+  else if (step === 3) {
+    const partners = (liveLaundromatsList && liveLaundromatsList.length > 0) ? liveLaundromatsList : DEFAULT_PARTNERS;
+
+    html = `
+      <div style="margin-bottom:24px;">
+        <span class="chip" style="font-size:11px;">STEP 3 OF 8</span>
+        <h2 style="margin:8px 0 4px; font-size:22px;">Select Your Partner Laundromat</h2>
+        <p style="color:var(--text-secondary); font-size:14px;">Pick the certified local facility that will wash, dry, and finish your garments.</p>
+      </div>
+
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:14px; margin-bottom:32px;">
+        ${partners.map(l => {
+          const isSelected = wizardState.laundromatId === l.id;
+          return `
+            <div class="service-card-full ${isSelected ? 'selected-service-card' : ''}" 
+                 style="cursor:pointer; padding:18px; border:2px solid ${isSelected ? 'var(--ink)' : 'var(--border)'};"
+                 onclick="wizardSelectLaundromat('${l.id}', '${escapeHtml(l.businessName)}', '${escapeHtml(l.city || '')}')">
+              <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
+                <span class="chip chip-teal" style="font-size:10px;">★ ${l.rating || '4.9'} Verified</span>
+                ${isSelected ? '<span style="color:var(--emerald-600); font-weight:700; font-size:13px;">✓ Selected</span>' : ''}
+              </div>
+              <h4 style="font-size:15px; margin-bottom:4px; color:var(--ink);">${escapeHtml(l.businessName)}</h4>
+              <div style="font-size:12.5px; color:var(--text-secondary); margin-bottom:6px;">📍 ${escapeHtml(l.suburb || l.address || l.city)}</div>
+              <div style="font-size:11.5px; color:var(--slate-500); line-height:1.4; margin-bottom:6px;">⏱️ Turnaround: ${escapeHtml(l.turnaround || '24 Hours')}</div>
+              <div style="font-size:11px; color:var(--teal-600); font-weight:600; background:var(--mist-100); padding:4px 8px; border-radius:4px;">
+                🧺 Basket size &amp; item tariffs
+              </div>
+            </div>
+          `;
+        }).join('')}
       </div>
 
       <div style="display:flex; justify-content:space-between;">
@@ -3382,10 +3603,12 @@ function renderWizardStep(step) {
         <button class="btn btn-solid" onclick="wizardNext()">Continue: Pickup Address &rarr;</button>
       </div>
     `;
-  } else if (step === 3) {
+  }
+  // STEP 4: ADDRESS
+  else if (step === 4) {
     html = `
       <div style="margin-bottom:24px;">
-        <span class="chip" style="font-size:11px;">STEP 3 OF 8</span>
+        <span class="chip" style="font-size:11px;">STEP 4 OF 8</span>
         <h2 style="margin:8px 0 4px; font-size:22px;">Where Should We Collect?</h2>
         <p style="color:var(--slate-500); font-size:14px;">Enter your street address, building name, and estate gate code.</p>
       </div>
@@ -3401,13 +3624,12 @@ function renderWizardStep(step) {
             <label style="font-size:13px; font-weight:600; margin-bottom:6px; display:block;">City / Metropolitan Area</label>
             <select id="wizSuburbSelect" onchange="wizardState.suburb = this.value;">
               <option value="" ${!wizardState.suburb ? 'selected' : ''} disabled>Select city / metro</option>
+              <option value="Cape Town" ${wizardState.suburb === 'Cape Town' ? 'selected' : ''}>Cape Town (Western Cape)</option>
               <option value="Johannesburg" ${wizardState.suburb === 'Johannesburg' ? 'selected' : ''}>Johannesburg (Gauteng)</option>
               <option value="Pretoria / Tshwane" ${wizardState.suburb === 'Pretoria / Tshwane' ? 'selected' : ''}>Pretoria / Tshwane (Gauteng)</option>
-              <option value="Cape Town" ${wizardState.suburb === 'Cape Town' ? 'selected' : ''}>Cape Town (Western Cape)</option>
               <option value="Durban / eThekwini" ${wizardState.suburb === 'Durban / eThekwini' ? 'selected' : ''}>Durban / eThekwini (KZN)</option>
               <option value="Gqeberha / Port Elizabeth" ${wizardState.suburb === 'Gqeberha / Port Elizabeth' ? 'selected' : ''}>Gqeberha (Eastern Cape)</option>
               <option value="Bloemfontein" ${wizardState.suburb === 'Bloemfontein' ? 'selected' : ''}>Bloemfontein (Free State)</option>
-              <option value="Other National Metros" ${wizardState.suburb === 'Other National Metros' ? 'selected' : ''}>Other South Africa Metro</option>
             </select>
           </div>
 
@@ -3423,79 +3645,70 @@ function renderWizardStep(step) {
         <button class="btn btn-solid" onclick="wizardSaveAddressAndNext()">Continue: Select Date &rarr;</button>
       </div>
     `;
-  } else if (step === 4) {
+  }
+  // STEP 5: DATE & TIME WINDOW
+  else if (step === 5) {
     const todayStr = new Date().toISOString().split('T')[0];
     html = `
       <div style="margin-bottom:24px;">
-        <span class="chip" style="font-size:11px;">STEP 4 OF 8</span>
-        <h2 style="margin:8px 0 4px; font-size:22px;">Select Pickup Date</h2>
-        <p style="color:var(--text-secondary); font-size:14px;">Choose today for instant dispatch or pick a scheduled future date.</p>
+        <span class="chip" style="font-size:11px;">STEP 5 OF 8</span>
+        <h2 style="margin:8px 0 4px; font-size:22px;">Select Pickup Date &amp; Courier Window</h2>
+        <p style="color:var(--text-secondary); font-size:14px;">Couriers operate on dedicated localized routes with live GPS tracking.</p>
       </div>
 
-      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; margin-bottom:28px;">
+      <h4 style="font-size:14px; margin-bottom:10px; color:var(--ink);">1. Pickup Day</h4>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; margin-bottom:24px;">
         <div class="service-card-full ${wizardState.pickupDate === 'today' ? 'selected-service-card' : ''}" 
-             style="cursor:pointer; padding:20px; text-align:center; border:2px solid ${wizardState.pickupDate === 'today' ? 'var(--ink)' : 'var(--border)'};"
+             style="cursor:pointer; padding:18px; text-align:center; border:2px solid ${wizardState.pickupDate === 'today' ? 'var(--ink)' : 'var(--border)'};"
              onclick="wizardSetDate('today')">
           <div style="font-size:22px; margin-bottom:6px;">⚡</div>
-          <strong style="font-size:16px;">Today</strong>
+          <strong style="font-size:15px; color:var(--ink);">Today</strong>
           <div style="font-size:12px; color:var(--emerald-600); font-weight:600; margin-top:4px;">Same-Day Collection</div>
         </div>
 
         <div class="service-card-full ${wizardState.pickupDate === 'tomorrow' ? 'selected-service-card' : ''}" 
-             style="cursor:pointer; padding:20px; text-align:center; border:2px solid ${wizardState.pickupDate === 'tomorrow' ? 'var(--ink)' : 'var(--border)'};"
+             style="cursor:pointer; padding:18px; text-align:center; border:2px solid ${wizardState.pickupDate === 'tomorrow' ? 'var(--ink)' : 'var(--border)'};"
              onclick="wizardSetDate('tomorrow')">
           <div style="font-size:22px; margin-bottom:6px;">📅</div>
-          <strong style="font-size:16px;">Tomorrow</strong>
-          <div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Morning Priority</div>
+          <strong style="font-size:15px; color:var(--ink);">Tomorrow</strong>
+          <div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Priority Routing</div>
         </div>
 
         <div class="service-card-full ${wizardState.pickupDate === 'custom' ? 'selected-service-card' : ''}" 
-             style="cursor:pointer; padding:20px; text-align:center; border:2px solid ${wizardState.pickupDate === 'custom' ? 'var(--ink)' : 'var(--border)'};"
+             style="cursor:pointer; padding:18px; text-align:center; border:2px solid ${wizardState.pickupDate === 'custom' ? 'var(--ink)' : 'var(--border)'};"
              onclick="wizardSetDate('custom')">
           <div style="font-size:22px; margin-bottom:6px;">🗓️</div>
-          <strong style="font-size:16px;">Specific Date</strong>
+          <strong style="font-size:15px; color:var(--ink);">Specific Date</strong>
           <input type="date" id="wizCustomDateInput" min="${todayStr}" value="${wizardState.customDate || todayStr}" 
                  style="margin-top:8px; font-size:12px; width:100%; border:1px solid var(--border); border-radius:var(--r-full); padding:6px 12px;"
                  onchange="wizardState.customDate = this.value; wizardSetDate('custom');">
         </div>
       </div>
 
-      <div style="display:flex; justify-content:space-between;">
-        <button class="btn btn-outline" onclick="wizardPrev()">&larr; Back</button>
-        <button class="btn btn-solid" onclick="wizardNext()">Continue: Choose Time Slot &rarr;</button>
-      </div>
-    `;
-  } else if (step === 5) {
-    html = `
-      <div style="margin-bottom:24px;">
-        <span class="chip" style="font-size:11px;">STEP 5 OF 8</span>
-        <h2 style="margin:8px 0 4px; font-size:22px;">Select Courier Arrival Window</h2>
-        <p style="color:var(--text-secondary); font-size:14px;">Our couriers operate on dedicated localized routes with live GPS tracking.</p>
-      </div>
-
-      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:14px; margin-bottom:28px;">
+      <h4 style="font-size:14px; margin-bottom:10px; color:var(--ink);">2. Courier Arrival Window</h4>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; margin-bottom:28px;">
         <div class="service-card-full ${wizardState.timeSlot === '08:00 - 11:00' ? 'selected-service-card' : ''}" 
-             style="cursor:pointer; padding:20px; text-align:center; border:2px solid ${wizardState.timeSlot === '08:00 - 11:00' ? 'var(--ink)' : 'var(--border)'};"
+             style="cursor:pointer; padding:18px; text-align:center; border:2px solid ${wizardState.timeSlot === '08:00 - 11:00' ? 'var(--ink)' : 'var(--border)'};"
              onclick="wizardSetSlot('08:00 - 11:00')">
-          <div style="font-size:20px; margin-bottom:6px;">🌅</div>
-          <strong style="font-size:16px;">Morning Slot</strong>
-          <div style="font-size:13px; color:var(--text-secondary); margin-top:4px;">08:00 AM &ndash; 11:00 AM</div>
+          <div style="font-size:20px; margin-bottom:4px;">🌅</div>
+          <strong style="font-size:14.5px; color:var(--ink);">Morning Slot</strong>
+          <div style="font-size:12.5px; color:var(--text-secondary); margin-top:2px;">08:00 AM &ndash; 11:00 AM</div>
         </div>
 
         <div class="service-card-full ${wizardState.timeSlot === '12:00 - 15:00' ? 'selected-service-card' : ''}" 
-             style="cursor:pointer; padding:20px; text-align:center; border:2px solid ${wizardState.timeSlot === '12:00 - 15:00' ? 'var(--ink)' : 'var(--border)'};"
+             style="cursor:pointer; padding:18px; text-align:center; border:2px solid ${wizardState.timeSlot === '12:00 - 15:00' ? 'var(--ink)' : 'var(--border)'};"
              onclick="wizardSetSlot('12:00 - 15:00')">
-          <div style="font-size:20px; margin-bottom:6px;">☀️</div>
-          <strong style="font-size:16px;">Midday Slot</strong>
-          <div style="font-size:13px; color:var(--text-secondary); margin-top:4px;">12:00 PM &ndash; 15:00 PM</div>
+          <div style="font-size:20px; margin-bottom:4px;">☀️</div>
+          <strong style="font-size:14.5px; color:var(--ink);">Midday Slot</strong>
+          <div style="font-size:12.5px; color:var(--text-secondary); margin-top:2px;">12:00 PM &ndash; 15:00 PM</div>
         </div>
 
         <div class="service-card-full ${wizardState.timeSlot === '16:00 - 19:00' ? 'selected-service-card' : ''}" 
-             style="cursor:pointer; padding:20px; text-align:center; border:2px solid ${wizardState.timeSlot === '16:00 - 19:00' ? 'var(--ink)' : 'var(--border)'};"
+             style="cursor:pointer; padding:18px; text-align:center; border:2px solid ${wizardState.timeSlot === '16:00 - 19:00' ? 'var(--ink)' : 'var(--border)'};"
              onclick="wizardSetSlot('16:00 - 19:00')">
-          <div style="font-size:20px; margin-bottom:6px;">🌆</div>
-          <strong style="font-size:16px;">Evening Slot</strong>
-          <div style="font-size:13px; color:var(--text-secondary); margin-top:4px;">16:00 PM &ndash; 19:00 PM</div>
+          <div style="font-size:20px; margin-bottom:4px;">🌆</div>
+          <strong style="font-size:14.5px; color:var(--ink);">Evening Slot</strong>
+          <div style="font-size:12.5px; color:var(--text-secondary); margin-top:2px;">16:00 PM &ndash; 19:00 PM</div>
         </div>
       </div>
 
@@ -3504,7 +3717,9 @@ function renderWizardStep(step) {
         <button class="btn btn-solid" onclick="wizardNext()">Continue: Garment Care &rarr;</button>
       </div>
     `;
-  } else if (step === 6) {
+  }
+  // STEP 6: CARE
+  else if (step === 6) {
     html = `
       <div style="margin-bottom:24px;">
         <span class="chip" style="font-size:11px;">STEP 6 OF 8</span>
@@ -3543,18 +3758,19 @@ function renderWizardStep(step) {
         <button class="btn btn-solid" onclick="wizardNext()">Continue: Review Order &rarr;</button>
       </div>
     `;
-  } else if (step === 7) {
-    const subtotal = wizardState.weightOrItems * currentService.price;
-    const deliveryFee = subtotal >= 350 ? 0.00 : 45.00;
-    const discount = wizardState.discountAmount || 0.00;
-    const total = Math.max(0, subtotal + deliveryFee - discount);
-    const vatAmount = total * (15 / 115);
+  }
+  // STEP 7: REVIEW
+  else if (step === 7) {
+    const isIndividual = pricing.isIndividual;
+    const loadText = isIndividual 
+      ? `${wizardState.itemCount} items`
+      : wizardState.basketSizeLabel;
 
     html = `
       <div style="margin-bottom:24px;">
         <span class="chip" style="font-size:11px;">STEP 7 OF 8</span>
         <h2 style="margin:8px 0 4px; font-size:22px;">Review Order Summary</h2>
-        <p style="color:var(--slate-500); font-size:14px;">Verify your collection address, pickup window, and estimated invoice.</p>
+        <p style="color:var(--slate-500); font-size:14px;">Verify your collection address, selected partner laundromat, and estimated tariff.</p>
       </div>
 
       <div class="service-spec-box" style="margin-bottom:24px;">
@@ -3563,8 +3779,12 @@ function renderWizardStep(step) {
           <span class="spec-val"><strong>${escapeHtml(currentService.title)}</strong></span>
         </div>
         <div class="spec-item">
-          <span class="spec-label">Estimated Quantity</span>
-          <span class="spec-val">${wizardState.weightOrItems} ${currentService.unit}</span>
+          <span class="spec-label">Load Size / Quantity</span>
+          <span class="spec-val">${escapeHtml(loadText)}</span>
+        </div>
+        <div class="spec-item">
+          <span class="spec-label">Partner Laundromat</span>
+          <span class="spec-val" style="color:var(--teal-600); font-weight:700;">${escapeHtml(wizardState.laundromatName)}</span>
         </div>
         <div class="spec-item">
           <span class="spec-label">Pickup Address</span>
@@ -3580,52 +3800,54 @@ function renderWizardStep(step) {
         </div>
         <div class="spec-item">
           <span class="spec-label">Service Subtotal</span>
-          <span class="spec-val">R${subtotal.toFixed(2)}</span>
+          <span class="spec-val">R${pricing.subtotal.toFixed(2)}</span>
         </div>
         <div class="spec-item">
           <span class="spec-label">Doorstep Dispatch &amp; Return</span>
-          <span class="spec-val" style="color:${deliveryFee === 0 ? 'var(--emerald-600)' : 'var(--ink)'}; font-weight:700;">
-            ${deliveryFee === 0 ? 'FREE (Order &gt; R350)' : 'R45.00'}
+          <span class="spec-val" style="color:${pricing.deliveryFee === 0 ? 'var(--emerald-600)' : 'var(--ink)'}; font-weight:700;">
+            ${pricing.deliveryFee === 0 ? 'FREE (Order &gt; R350)' : 'R45.00'}
           </span>
         </div>
-        ${discount > 0 ? `
+        ${pricing.discount > 0 ? `
           <div class="spec-item">
             <span class="spec-label">Promo Code Discount</span>
-            <span class="spec-val" style="color:var(--rose-600); font-weight:700;">-R${discount.toFixed(2)}</span>
+            <span class="spec-val" style="color:var(--rose-600); font-weight:700;">-R${pricing.discount.toFixed(2)}</span>
           </div>
         ` : ''}
         <div class="spec-item" style="border-top:1px solid var(--border); padding-top:12px; margin-top:8px;">
           <span class="spec-label" style="font-size:16px; font-weight:700;">Estimated Total (incl. 15% VAT)</span>
-          <span class="spec-val" style="font-size:20px; font-weight:700; color:var(--ink);">R${total.toFixed(2)}</span>
+          <span class="spec-val" style="font-size:20px; font-weight:700; color:var(--ink);">R${pricing.total.toFixed(2)}</span>
         </div>
-        <div style="font-size:11.5px; color:var(--text-secondary); text-align:right; margin-top:4px;">Includes R${vatAmount.toFixed(2)} SARS VAT</div>
+        <div style="font-size:11.5px; color:var(--text-secondary); text-align:right; margin-top:4px;">Includes R${pricing.vatAmount.toFixed(2)} SARS VAT · No scale weighing required</div>
       </div>
 
       <!-- Promo Code Field -->
       <div style="display:flex; gap:10px; margin-bottom:28px;">
-        <input type="text" id="wizPromoInput" placeholder="Promo code (e.g. MMWELCOME or UBER50)" style="flex:1; padding:10px 14px; border:1px solid var(--border); border-radius:var(--r-full); font-size:14px;">
+        <input type="text" id="wizPromoInput" placeholder="Promo code (e.g. MMWELCOME, SAVE50, UBER50)" style="flex:1; padding:10px 14px; border:1px solid var(--border); border-radius:var(--r-full); font-size:14px;">
         <button type="button" class="btn btn-outline btn-sm" onclick="wizardApplyPromo()">Apply Code</button>
       </div>
 
       <div style="display:flex; justify-content:space-between;">
         <button class="btn btn-outline" onclick="wizardPrev()">&larr; Back</button>
-        <button class="btn btn-solid" onclick="wizardNext()">Continue: Select Payment &rarr;</button>
+        <button class="btn btn-solid" onclick="wizardNext()">Continue: Confirm &amp; Place Order &rarr;</button>
       </div>
     `;
-  } else if (step === 8) {
+  }
+  // STEP 8: CONFIRM & PLACE ORDER
+  else if (step === 8) {
     html = `
       <div style="margin-bottom:24px;">
         <span class="chip" style="font-size:11px;">STEP 8 OF 8</span>
         <h2 style="margin:8px 0 4px; font-size:22px;">Confirm &amp; Place Order</h2>
-        <p style="color:var(--text-secondary); font-size:14px;">Select how you would like to pay when your laundry is weighed and intake-certified.</p>
+        <p style="color:var(--text-secondary); font-size:14px;">Select how you would like to pay. You will receive your 4-digit handover PIN immediately.</p>
       </div>
 
-      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:14px; margin-bottom:32px;">
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:14px; margin-bottom:28px;">
         <div class="service-card-full ${wizardState.paymentMethod === 'instant_eft' ? 'selected-service-card' : ''}" 
              style="cursor:pointer; padding:20px; border:2px solid ${wizardState.paymentMethod === 'instant_eft' ? 'var(--ink)' : 'var(--border)'};"
              onclick="wizardSelectPayment('instant_eft')">
           <div style="font-size:20px; margin-bottom:6px;">🏦</div>
-          <strong style="font-size:15px;">Instant EFT (PayFast / Ozow)</strong>
+          <strong style="font-size:15px; color:var(--ink);">Instant EFT (PayFast / Ozow)</strong>
           <p style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Direct bank clearance via FNB, Capitec, Standard Bank, Nedbank, Absa.</p>
         </div>
 
@@ -3633,7 +3855,7 @@ function renderWizardStep(step) {
              style="cursor:pointer; padding:20px; border:2px solid ${wizardState.paymentMethod === 'credit_card' ? 'var(--ink)' : 'var(--border)'};"
              onclick="wizardSelectPayment('credit_card')">
           <div style="font-size:20px; margin-bottom:6px;">💳</div>
-          <strong style="font-size:15px;">Credit / Debit Card</strong>
+          <strong style="font-size:15px; color:var(--ink);">Credit / Debit Card</strong>
           <p style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Visa, Mastercard, American Express with 3D-Secure 2.0.</p>
         </div>
 
@@ -3641,13 +3863,53 @@ function renderWizardStep(step) {
              style="cursor:pointer; padding:20px; border:2px solid ${wizardState.paymentMethod === 'doorstep_pos' ? 'var(--ink)' : 'var(--border)'};"
              onclick="wizardSelectPayment('doorstep_pos')">
           <div style="font-size:20px; margin-bottom:6px;">📱</div>
-          <strong style="font-size:15px;">Doorstep Mobile POS Tap</strong>
+          <strong style="font-size:15px; color:var(--ink);">Doorstep Mobile POS Tap</strong>
           <p style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Tap your card or Apple/Google Pay directly on the courier's handheld device.</p>
         </div>
       </div>
 
+      ${!currentUser ? `
+        <!-- Seamless In-step Account Registration for Guests -->
+        <div style="background:var(--surface-soft); border:1px solid var(--border); border-radius:var(--r-card); padding:20px; margin-bottom:24px;">
+          <h4 style="font-size:15px; margin-bottom:6px; color:var(--ink);">Account &amp; Contact Details</h4>
+          <p style="font-size:13px; color:var(--slate-500); margin-bottom:14px;">An account is required to generate your secure Handover PIN and live courier tracking.</p>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+            <div class="field">
+              <label style="font-size:12px; font-weight:600; margin-bottom:4px; display:block;">Full Name *</label>
+              <input type="text" id="wizGuestName" placeholder="Your name" required>
+            </div>
+            <div class="field">
+              <label style="font-size:12px; font-weight:600; margin-bottom:4px; display:block;">Mobile Phone (+27) *</label>
+              <input type="tel" id="wizGuestPhone" placeholder="082 123 4567" required>
+            </div>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+            <div class="field">
+              <label style="font-size:12px; font-weight:600; margin-bottom:4px; display:block;">Email Address *</label>
+              <input type="email" id="wizGuestEmail" placeholder="you@domain.co.za" required>
+            </div>
+            <div class="field">
+              <label style="font-size:12px; font-weight:600; margin-bottom:4px; display:block;">Create Password *</label>
+              <input type="password" id="wizGuestPassword" placeholder="Min. 6 characters" required>
+            </div>
+          </div>
+          <div style="margin-top:10px; font-size:12px; color:var(--slate-500);">
+            Already have an account? <a href="javascript:void(0)" onclick="openAuthModal('login', '/book')" style="font-weight:600; color:var(--teal-600);">Sign in here</a>
+          </div>
+        </div>
+      ` : `
+        <div style="background:var(--surface-soft); border:1px solid var(--border); border-radius:var(--r-card); padding:16px; margin-bottom:24px; display:flex; justify-content:space-between; align-items:center;">
+          <div>
+            <span class="chip chip-emerald" style="font-size:10px;">SIGNED IN</span>
+            <div style="font-weight:700; font-size:15px; margin-top:4px; color:var(--ink);">${escapeHtml(currentUser.name || 'Account Holder')}</div>
+            <div style="font-size:12.5px; color:var(--text-secondary);">${escapeHtml(currentUser.email)} · ${escapeHtml(currentUser.phone || '')}</div>
+          </div>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="openProfileModal()">Edit Details</button>
+        </div>
+      `}
+
       <div style="background:var(--surface-soft); border:1px solid var(--border); border-radius:var(--r-card); padding:16px; margin-bottom:28px; font-size:13px; color:var(--ink);">
-        🔒 <strong>M&amp;M Garment Care Guarantee:</strong> Your card is only charged after intake on certified trade scales. You will receive your 4-digit handover PIN immediately upon order confirmation.
+        🔒 <strong>M&amp;M Garment Care Guarantee:</strong> Handover PIN generated instantly. You will receive an SMS and digital receipt upon collection. No scale weighing required.
       </div>
 
       <div style="display:flex; justify-content:space-between;">
@@ -3663,6 +3925,10 @@ function renderWizardStep(step) {
 function wizardNext() {
   if (wizardState.currentStep === 1 && !wizardState.serviceKey) {
     showToast('Please choose a laundry service to continue.', 'error');
+    return;
+  }
+  if (wizardState.currentStep === 4 && (!wizardState.address || wizardState.address.trim().length < 3)) {
+    showToast('Please enter your pickup street address.', 'error');
     return;
   }
   if (wizardState.currentStep < 8) {
@@ -3681,14 +3947,22 @@ function wizardSelectService(key) {
   renderWizardStep(1);
 }
 
-function wizardSetWeight(val, unitLabel) {
-  wizardState.weightOrItems = parseFloat(val);
-  const display = document.getElementById('wizardWeightDisplay');
-  const subtotalVal = document.getElementById('wizardSubtotalVal');
-  const currentService = SERVICES_DATA.find(s => s.key === wizardState.serviceKey) || SERVICES_DATA[0];
+function wizardSelectBasketSize(size, label) {
+  wizardState.basketSize = size;
+  wizardState.basketSizeLabel = label;
+  renderWizardStep(2);
+}
 
-  if (display) display.textContent = `${val} ${unitLabel}`;
-  if (subtotalVal) subtotalVal.textContent = `R${(val * currentService.price).toFixed(2)}`;
+function wizardSetItemCount(delta) {
+  wizardState.itemCount = Math.max(1, (wizardState.itemCount || 1) + delta);
+  renderWizardStep(2);
+}
+
+function wizardSelectLaundromat(id, name, city) {
+  wizardState.laundromatId = id;
+  wizardState.laundromatName = name;
+  wizardState.laundromatCity = city;
+  renderWizardStep(3);
 }
 
 function wizardSaveAddressAndNext() {
@@ -3716,7 +3990,7 @@ function wizardSaveAddressAndNext() {
 
 function wizardSetDate(d) {
   wizardState.pickupDate = d;
-  renderWizardStep(4);
+  renderWizardStep(5);
 }
 
 function wizardSetSlot(s) {
@@ -3742,31 +4016,71 @@ function wizardApplyPromo() {
 }
 
 async function wizardSubmitOrder() {
+  // If user is not logged in, handle guest signup from in-step form
   if (!currentUser || !authToken) {
-    showToast('Please sign in or create an account to place your order.', 'info');
-    openAuthModal('login', '/book');
-    return;
+    const name = document.getElementById('wizGuestName')?.value?.trim();
+    const phone = document.getElementById('wizGuestPhone')?.value?.trim();
+    const email = document.getElementById('wizGuestEmail')?.value?.trim();
+    const password = document.getElementById('wizGuestPassword')?.value;
+
+    if (!name || !email || !password) {
+      showToast('Please complete your name, email, and password to place your order.', 'error');
+      return;
+    }
+    if (password.length < 6) {
+      showToast('Password must be at least 6 characters.', 'error');
+      return;
+    }
+
+    try {
+      const regRes = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, phone, email, password, address: wizardState.address })
+      });
+      const regData = await regRes.json();
+      if (!regRes.ok || !regData.token) {
+        showToast(regData.error || 'Account creation failed. Please try signing in.', 'error');
+        return;
+      }
+      authToken = regData.token;
+      currentUser = regData.user;
+      localStorage.setItem('mm_auth_token', authToken);
+      localStorage.setItem('mm_user', JSON.stringify(currentUser));
+      updateNavAuthUI();
+      showToast(`Welcome ${currentUser.name}! Account created.`, 'success');
+    } catch (err) {
+      showToast('Failed to create account. Please try again.', 'error');
+      return;
+    }
   }
 
   const currentService = SERVICES_DATA.find(s => s.key === wizardState.serviceKey) || SERVICES_DATA[0];
-  const subtotal = wizardState.weightOrItems * currentService.price;
-  const deliveryFee = subtotal >= 350 ? 0.00 : 45.00;
-  const total = Math.max(0, subtotal + deliveryFee - (wizardState.discountAmount || 0));
+  const pricing = wizardCalculatePricing();
+  const loadDescription = pricing.isIndividual ? `${wizardState.itemCount} items` : wizardState.basketSizeLabel;
 
   const payload = {
+    serviceType: currentService.title,
     service: wizardState.serviceKey,
-    weight: wizardState.weightOrItems,
-    address: `${wizardState.address}, ${wizardState.suburb}`,
-    gateCode: wizardState.gateCode,
-    pickupDate: wizardState.pickupDate,
-    timeSlot: wizardState.timeSlot,
+    laundromatId: wizardState.laundromatId || 'lnd_cpt_1',
+    laundromatName: wizardState.laundromatName || 'Kloof Street Laundromat & Garment Care',
+    basketSize: loadDescription,
+    bagCount: 1,
+    estimatedWeight: loadDescription,
+    pickupAddress: `${wizardState.address}${wizardState.gateCode ? ' (Gate: ' + wizardState.gateCode + ')' : ''}, ${wizardState.suburb}`,
+    address: `${wizardState.address}${wizardState.gateCode ? ' (Gate: ' + wizardState.gateCode + ')' : ''}, ${wizardState.suburb}`,
+    pickupTime: `${wizardState.pickupDate === 'today' ? 'Today' : (wizardState.pickupDate === 'tomorrow' ? 'Tomorrow' : wizardState.customDate)} · ${wizardState.timeSlot}`,
     detergent: wizardState.detergent,
     folding: wizardState.folding,
-    instructions: wizardState.specialInstructions,
+    specialInstructions: wizardState.specialInstructions,
     paymentMethod: wizardState.paymentMethod,
-    subtotal: subtotal,
-    deliveryFee: deliveryFee,
-    total: total
+    subtotal: pricing.subtotal,
+    deliveryFee: pricing.deliveryFee,
+    total: pricing.total,
+    discount: pricing.discount,
+    items: [
+      { name: `${currentService.title} (${loadDescription})`, price: pricing.total }
+    ]
   };
 
   try {
@@ -3781,11 +4095,11 @@ async function wizardSubmitOrder() {
 
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.order) {
-      showToast(`Order ${data.order.id} booked! Courier dispatched.`, 'success');
+      showToast(`Order ${data.order.id} booked! Handover PIN: ${data.order.pin || '4892'}`, 'success');
       currentTrackingOrder = data.order;
       navigateTo(`/orders/${data.order.id}`);
     } else {
-      showToast(data.error || 'Failed to place order. Please try again.', 'error');
+      showToast(data.error || 'Failed to place order. Please check required fields.', 'error');
     }
   } catch (err) {
     showToast('Failed to connect to server. Please check your internet connection.', 'error');
@@ -3798,7 +4112,7 @@ async function wizardSubmitOrder() {
 const STAGES = [
   { stage: 1, label: 'Driver Dispatched', desc: 'Courier heading to your address' },
   { stage: 2, label: 'Laundry Collected', desc: 'Garments secured in transit bag' },
-  { stage: 3, label: 'Hub Intake & Scale', desc: 'Weighed on trade-certified scales' },
+  { stage: 3, label: 'Laundromat Intake', desc: 'Basket size & specialty care verified' },
   { stage: 4, label: 'Washing & Care', desc: 'Dedicated sanitized drum cycle' },
   { stage: 5, label: 'Drying & Retail Fold', desc: 'Low-temperature gentle tumble' },
   { stage: 6, label: 'Quality Inspection', desc: 'Sealed in weather-proof packs' },
@@ -4380,7 +4694,10 @@ window.renderWizardStep = renderWizardStep;
 window.wizardNext = wizardNext;
 window.wizardPrev = wizardPrev;
 window.wizardSelectService = wizardSelectService;
-window.wizardSetWeight = wizardSetWeight;
+window.wizardSelectBasketSize = wizardSelectBasketSize;
+window.wizardSetItemCount = wizardSetItemCount;
+window.wizardSelectLaundromat = wizardSelectLaundromat;
+window.wizardCalculatePricing = wizardCalculatePricing;
 window.wizardSaveAddressAndNext = wizardSaveAddressAndNext;
 window.wizardSetDate = wizardSetDate;
 window.wizardSetSlot = wizardSetSlot;
