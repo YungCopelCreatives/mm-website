@@ -73,7 +73,7 @@ function showToast(message, type = 'info') {
     iconSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#E11D48" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
   }
 
-  toast.innerHTML = `${iconSvg}<span>${message}</span>`;
+  toast.innerHTML = `${iconSvg}<span>${escapeHtml(message)}</span>`;
   container.appendChild(toast);
 
   setTimeout(() => {
@@ -279,7 +279,7 @@ async function handleSignup(e) {
     const res = await fetch('/api/auth/signup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, phone, password, address, role: 'customer' })
+      body: JSON.stringify({ name, email, phone, password, address, consent: !!agreeTerms })
     });
     const data = await res.json();
 
@@ -914,7 +914,7 @@ async function handleCheckoutSignup(e) {
     const res = await fetch('/api/auth/signup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, phone, address, password })
+      body: JSON.stringify({ name, email, phone, address, password, consent: !!document.getElementById('checkoutSignupConsent')?.checked })
     });
     const data = await res.json();
 
@@ -976,8 +976,11 @@ async function submitFinalPayment() {
     phone: currentUser.phone,
     pickupAddress: fullPickupAddress,
     serviceType: pendingBooking.serviceName,
-    laundromatId: pendingBooking.laundromatId || 'lnd_cpt_1',
-    laundromatName: pendingBooking.laundromatName || 'Kloof Street Laundromat & Garment Care',
+    serviceKey: pendingBooking.serviceKey,
+    sizeValue: pendingBooking.sizeValue,
+    promoCode: pendingBooking.promoCode,
+    laundromatId: pendingBooking.laundromatId || '',
+    laundromatName: pendingBooking.laundromatName || '',
     basketSize: pendingBooking.weightText,
     bagCount: pendingBooking.sizeValue === 'small' ? 1 : (pendingBooking.sizeValue === 'medium' ? 2 : 3),
     estimatedWeight: pendingBooking.weightText,
@@ -1010,7 +1013,7 @@ async function submitFinalPayment() {
     const data = await res.json();
 
     if (res.ok && data.order) {
-      showToast(`Pickup scheduled! Order ${data.order.id} booked with ${data.order.laundromatName || 'partner'}.`, 'success');
+      showToast(`Pickup scheduled! Order ${data.order.id} booked with ${data.order.laundromatName || 'a partner laundromat'}.`, 'success');
       closeCheckoutModal();
       goToBookingStep(1); // Reset widget
 
@@ -1070,7 +1073,7 @@ function renderSpotlightTracker(order) {
 
   const badge = document.getElementById('spotlightStatusBadge');
   if (badge) {
-    badge.innerHTML = `<span class="live-pulse"></span> ${order.status.toUpperCase().replace(/_/g, ' ')}`;
+    badge.innerHTML = `<span class="live-pulse"></span> ${escapeHtml(String(order.status || '').toUpperCase().replace(/_/g, ' '))}`;
   }
 
   const steps = [
@@ -1098,8 +1101,8 @@ function renderSpotlightTracker(order) {
         item.classList.add('active');
       }
       item.innerHTML = `
-        <div style="font-weight:600;">${s.label}</div>
-        <div class="step-time">${s.desc}</div>
+        <div style="font-weight:600;">${escapeHtml(s.label)}</div>
+        <div class="step-time">${escapeHtml(s.desc)}</div>
       `;
       listContainer.appendChild(item);
     });
@@ -1117,7 +1120,7 @@ async function handleTrackSearch(e) {
   const orderId = rawId.toUpperCase().startsWith('MM-') ? rawId.toUpperCase() : `MM-${rawId.replace(/[^0-9]/g, '')}`;
 
   try {
-    const res = await fetch(`/api/orders/${orderId}`);
+    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, { headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {} });
     if (!res.ok) {
       showToast(`Order "${orderId}" not found. Please verify your order ID.`, 'error');
       return;
@@ -1139,7 +1142,7 @@ async function openTrackerModal(orderId = null) {
   try {
     let order = null;
     if (orderId) {
-      const res = await fetch(`/api/orders/${orderId}`);
+      const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, { headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {} });
       if (res.ok) {
         const d = await res.json();
         order = d.order;
@@ -1241,8 +1244,8 @@ function renderTrackerView(order) {
       }
 
       item.innerHTML = `
-        <div style="font-weight:600;">${s.label}</div>
-        <div class="step-time">${s.desc}</div>
+        <div style="font-weight:600;">${escapeHtml(s.label)}</div>
+        <div class="step-time">${escapeHtml(s.desc)}</div>
       `;
       listContainer.appendChild(item);
     });
@@ -1252,14 +1255,14 @@ function renderTrackerView(order) {
   const activeStep = steps[effectiveIdx] || steps[0];
   const badge = document.getElementById('trackerCurrentStageBadge');
   if (badge) {
-    badge.innerHTML = `<span class="live-pulse"></span> ${activeStep.label}`;
+    badge.innerHTML = `<span class="live-pulse"></span> ${escapeHtml(activeStep.label)}`;
   }
 }
 
 async function advanceOrderStatusSimulation() {
   if (!currentTrackingOrder) return;
   try {
-    const res = await fetch(`/api/orders/${currentTrackingOrder.id}/advance`, {
+    const res = await fetch(`/api/orders/${encodeURIComponent(currentTrackingOrder.id)}/advance`, {
       method: 'POST'
     });
     const data = await res.json();
@@ -1395,7 +1398,7 @@ function renderFilteredOrders() {
         ${order.deliveryPin ? `<div>🔑 <strong>Handover PIN:</strong> <span style="font-family:monospace; font-weight:700; color:var(--ink);">${escapeHtml(order.deliveryPin)}</span></div>` : ''}
       </div>
       <div style="display:flex; gap:10px;">
-        <button class="btn btn-solid btn-sm" onclick="closeMyOrdersModal(); openTrackerModal('${escapeHtml(order.id)}')">
+        <button class="btn btn-solid btn-sm" onclick="closeMyOrdersModal(); openTrackerModal(${escapeHtml(JSON.stringify(String(order.id)))})">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
           <span>Track Live Telemetry</span>
         </button>
@@ -1433,7 +1436,7 @@ async function handleDriverSubmit(e) {
     const res = await fetch('/api/partners/driver', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, phone, city, vehicleType })
+      body: JSON.stringify({ name, email, phone, city, vehicleType, consent: !!document.getElementById('drvConsent')?.checked })
     });
     const data = await res.json();
     if (res.ok) {
@@ -1470,7 +1473,7 @@ async function handleLaundromatSubmit(e) {
     const res = await fetch('/api/partners/laundromat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ businessName, contactName, email, phone, address, machineCount })
+      body: JSON.stringify({ businessName, contactName, email, phone, address, machineCount, consent: !!document.getElementById('lndConsent')?.checked })
     });
     const data = await res.json();
     if (res.ok) {
@@ -1508,7 +1511,7 @@ async function handleBusinessSubmit(e) {
     const res = await fetch('/api/business/inquiry', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ companyName, contactName, email, phone, industry, estimatedVolume, notes })
+      body: JSON.stringify({ companyName, contactName, email, phone, industry, estimatedVolume, notes, consent: !!document.getElementById('bizConsent')?.checked })
     });
     const data = await res.json();
     if (res.ok) {
@@ -1898,7 +1901,7 @@ function renderProfileSavedAddresses() {
         <span class="saved-address-label">${escapeHtml(addr.label || 'Saved')}</span>
         <span style="font-size:13.5px; color:var(--ink);">${escapeHtml(addr.address)}</span>
       </div>
-      <button class="btn btn-outline btn-sm" style="padding:4px 8px; color:var(--rose-600); border-color:var(--rose-200); font-size:11px;" onclick="deleteSavedAddress('${escapeHtml(addr.id || addr.address)}')">
+      <button class="btn btn-outline btn-sm" style="padding:4px 8px; color:var(--rose-600); border-color:var(--rose-200); font-size:11px;" onclick="deleteSavedAddress(${escapeHtml(JSON.stringify(String(addr.id || addr.address)))})">
         Remove
       </button>
     </div>
@@ -3239,57 +3242,57 @@ function updateCommercialCalc(val) {
 
 async function handleBusinessInquirySubmit(e) {
   e.preventDefault();
-  const company = document.getElementById('bizCompanyName')?.value;
-  const contact = document.getElementById('bizContactName')?.value;
-  const email = document.getElementById('bizEmail')?.value;
-  const phone = document.getElementById('bizPhone')?.value;
-  const industry = document.getElementById('bizIndustry')?.value;
-  const location = document.getElementById('bizLocation')?.value;
-  const notes = document.getElementById('bizNotes')?.value;
+  const companyName = document.getElementById('bizPageCompanyName')?.value;
+  const contactName = document.getElementById('bizPageContactName')?.value;
+  const email = document.getElementById('bizPageEmail')?.value;
+  const phone = document.getElementById('bizPagePhone')?.value;
+  const industry = document.getElementById('bizPageIndustry')?.value;
+  const location = document.getElementById('bizPageLocation')?.value;
+  const notes = document.getElementById('bizPageNotes')?.value;
+  const consent = !!document.getElementById('bizPageConsent')?.checked;
 
   try {
     const res = await fetch('/api/business/inquiry', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ company, contact, email, phone, industry, location, notes })
+      body: JSON.stringify({ companyName, contactName, email, phone, industry, location, notes, consent })
     });
+    const data = await res.json().catch(() => ({}));
     if (res.ok) {
       showToast('Commercial inquiry received! A corporate account manager will contact you today.', 'success');
       e.target.reset();
     } else {
-      showToast('Inquiry logged successfully. We will reach out within 2 hours.', 'success');
-      e.target.reset();
+      showToast(data.error || 'We could not submit your inquiry. Please check the form and try again.', 'error');
     }
   } catch (err) {
-    showToast('Inquiry received! Our commercial team has been notified.', 'success');
-    e.target.reset();
+    showToast('Network error - your inquiry was not sent. Please try again.', 'error');
   }
 }
 
 async function handleContactHubSubmit(e) {
   e.preventDefault();
-  const name = document.getElementById('contactHubName')?.value;
-  const email = document.getElementById('contactHubEmail')?.value;
-  const phone = document.getElementById('contactHubPhone')?.value;
-  const reason = document.getElementById('contactHubReason')?.value;
-  const message = document.getElementById('contactHubMessage')?.value;
+  const name = document.getElementById('contactName')?.value;
+  const email = document.getElementById('contactEmail')?.value;
+  const phone = document.getElementById('contactPhone')?.value;
+  const reason = document.getElementById('contactSubject')?.value;
+  const message = document.getElementById('contactMessage')?.value;
+  const consent = !!document.getElementById('contactConsent')?.checked;
 
   try {
     const res = await fetch('/api/support/message', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, phone, reason, message })
+      body: JSON.stringify({ name, email, phone, reason, message, consent })
     });
+    const data = await res.json().catch(() => ({}));
     if (res.ok) {
       showToast('Thank you for contacting M&M Dispatch. A support agent will respond shortly.', 'success');
       e.target.reset();
     } else {
-      showToast('Message sent to dispatch team. Expect a response in under 15 minutes.', 'success');
-      e.target.reset();
+      showToast(data.error || 'Your message could not be sent. Please try again.', 'error');
     }
   } catch (err) {
-    showToast('Message dispatched to Central Dispatch Desk.', 'success');
-    e.target.reset();
+    showToast('Network error - your message was not sent. Please try again.', 'error');
   }
 }
 
@@ -3890,9 +3893,13 @@ function renderWizardStep(step) {
             </div>
             <div class="field">
               <label style="font-size:12px; font-weight:600; margin-bottom:4px; display:block;">Create Password *</label>
-              <input type="password" id="wizGuestPassword" placeholder="Min. 6 characters" required>
+              <input type="password" id="wizGuestPassword" placeholder="Min. 8 characters" required>
             </div>
           </div>
+          <label for="wizGuestConsent" class="popia-consent" style="display:flex; align-items:flex-start; gap:8px; margin-top:12px; font-size:12.5px; cursor:pointer;">
+            <input type="checkbox" id="wizGuestConsent" required style="margin-top:3px; width:auto;">
+            <span>I consent to M&amp;M processing the personal information I submit to create my account and manage my orders, in line with the <a href="#privacy" onclick="event.preventDefault(); openLegalModal('privacy')">Privacy Policy</a> (POPIA).</span>
+          </label>
           <div style="margin-top:10px; font-size:12px; color:var(--slate-500);">
             Already have an account? <a href="javascript:void(0)" onclick="openAuthModal('login', '/book')" style="font-weight:600; color:var(--teal-600);">Sign in here</a>
           </div>
@@ -4027,8 +4034,13 @@ async function wizardSubmitOrder() {
       showToast('Please complete your name, email, and password to place your order.', 'error');
       return;
     }
-    if (password.length < 6) {
-      showToast('Password must be at least 6 characters.', 'error');
+    if (password.length < 8) {
+      showToast('Password must be at least 8 characters.', 'error');
+      return;
+    }
+    const consent = !!document.getElementById('wizGuestConsent')?.checked;
+    if (!consent) {
+      showToast('Please confirm your POPIA consent to create your account.', 'error');
       return;
     }
 
@@ -4036,7 +4048,7 @@ async function wizardSubmitOrder() {
       const regRes = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, phone, email, password, address: wizardState.address })
+        body: JSON.stringify({ name, phone, email, password, address: wizardState.address, consent })
       });
       const regData = await regRes.json();
       if (!regRes.ok || !regData.token) {
@@ -4074,13 +4086,9 @@ async function wizardSubmitOrder() {
     folding: wizardState.folding,
     specialInstructions: wizardState.specialInstructions,
     paymentMethod: wizardState.paymentMethod,
-    subtotal: pricing.subtotal,
-    deliveryFee: pricing.deliveryFee,
-    total: pricing.total,
-    discount: pricing.discount,
-    items: [
-      { name: `${currentService.title} (${loadDescription})`, price: pricing.total }
-    ]
+    sizeValue: wizardState.basketSize,
+    quantity: pricing.isIndividual ? wizardState.itemCount : undefined,
+    promoCode: wizardState.promoCode || '',
   };
 
   try {
@@ -4172,7 +4180,7 @@ async function loadUserOrdersList() {
                     <td style="padding:12px 10px; font-weight:600; color:var(--teal-600);">R${parseFloat(o.total || 0).toFixed(2)}</td>
                     <td style="padding:12px 10px;"><span class="chip chip-cyan" style="font-size:11px;">${escapeHtml(o.status || 'ACTIVE')}</span></td>
                     <td style="padding:12px 10px; text-align:right;">
-                      <button class="btn btn-outline btn-sm" onclick="loadAndTrackSpecificOrder('${o.id}')">Live Track</button>
+                      <button class="btn btn-outline btn-sm" onclick="loadAndTrackSpecificOrder(${escapeHtml(JSON.stringify(String(o.id)))})">Live Track</button>
                     </td>
                   </tr>
                 `).join('')}
@@ -4227,7 +4235,7 @@ function renderOrdersActiveCard(order) {
       <!-- Handover PIN Banner -->
       <div style="background:var(--teal-600); color:#FFFFFF; border-radius:var(--r-card); padding:10px 18px; text-align:center;">
         <div style="font-size:10.5px; text-transform:uppercase; letter-spacing:0.8px; opacity:0.9;">Handover PIN</div>
-        <div style="font-size:22px; font-weight:700; letter-spacing:3px;">${order.pin || '4892'}</div>
+        <div style="font-size:22px; font-weight:700; letter-spacing:3px;">${escapeHtml(order.deliveryPin || order.pin || '----')}</div>
       </div>
     </div>
 
@@ -4248,7 +4256,7 @@ function renderOrdersActiveCard(order) {
       <div style="background:var(--surface-soft); border-radius:var(--r-card); padding:16px; border:1px solid var(--border);">
         <span style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">Current Wash Telemetry</span>
         <div style="font-weight:600; font-size:15px; color:var(--ink);">${escapeHtml(order.telemetry?.washTemp || '30°C Eco-Cold')}</div>
-        <div style="font-size:12px; color:var(--teal-600); margin-top:2px;">Spin: ${order.telemetry?.drumRpm || 1200} RPM &bull; Sanitization Active</div>
+        <div style="font-size:12px; color:var(--teal-600); margin-top:2px;">Spin: ${Number(order.telemetry?.drumRpm) || 1200} RPM &bull; Sanitization Active</div>
       </div>
 
       <div style="background:var(--surface-soft); border-radius:var(--r-card); padding:16px; border:1px solid var(--border);">
@@ -4291,7 +4299,7 @@ async function loadAndTrackSpecificOrder(orderId) {
   }
 
   try {
-    const res = await fetch(`/api/orders/${orderId}`, {
+    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
       headers: { 'Authorization': `Bearer ${authToken}` }
     });
     if (res.ok) {
@@ -4485,7 +4493,7 @@ async function loadUserSavedAddresses(container) {
               <div style="color:var(--text-secondary); font-size:13.5px;">${escapeHtml(a.street)}</div>
               ${a.gateCode ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">Gate/Intercom: ${escapeHtml(a.gateCode)}</div>` : ''}
             </div>
-            <button class="btn btn-outline btn-sm" style="color:var(--rose-600); border-color:var(--rose-600);" onclick="handleAccountDeleteAddress('${a.id}')">Delete</button>
+            <button class="btn btn-outline btn-sm" style="color:var(--rose-600); border-color:var(--rose-600);" onclick="handleAccountDeleteAddress(${escapeHtml(JSON.stringify(String(a.id)))})">Delete</button>
           </div>
         `).join('')}
       </div>
@@ -4568,8 +4576,8 @@ function handleAccountSecuritySave(e) {
    AUTH PAGE CONTROLLER (/login, /signup, /forgot-password)
    ========================================================================= */
 function switchAuthMode(mode) {
-  const tabLogin = document.getElementById('authTabLogin');
-  const tabSignup = document.getElementById('authTabSignup');
+  const tabLogin = document.getElementById('authPageTabLogin');
+  const tabSignup = document.getElementById('authPageTabSignup');
   const formLogin = document.getElementById('authPageLoginForm');
   const formSignup = document.getElementById('authPageSignupForm');
   const formForgot = document.getElementById('authPageForgotForm');
@@ -4653,7 +4661,7 @@ async function handleAuthPageSignup(e) {
     const res = await fetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, phone, password })
+      body: JSON.stringify({ name, email, phone, password, consent: !!document.getElementById('authPageSignupConsent')?.checked })
     });
 
     const data = await res.json().catch(() => ({}));

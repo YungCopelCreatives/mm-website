@@ -1,6 +1,11 @@
-# robots.txt for M&M Laundry Services
+# robots.txt for M&M Laundromat
 User-agent: *
 Allow: /
+Disallow: /api/
+Disallow: /account
+Disallow: /orders
+Disallow: /login
+Disallow: /signup
+Disallow: /forgot-password
 
-# Sitemaps
-Sitemap: /sitemap.xml
+Sitemap: __SITE_URL__/sitemap.xml

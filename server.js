@@ -1,992 +1,932 @@
+/**
+ * M&M Laundromat — production web server.
+ *
+ * Storage note: this server keeps data in a single JSON file with atomic writes.
+ * That is acceptable for a low-traffic, single-instance pilot ONLY. Before real
+ * launch move to a managed database (e.g. Postgres on Supabase/Neon/RDS) — a JSON
+ * file cannot be shared between instances, has no transactions/backups, and on
+ * most container hosts (Cloud Run, Render free tier, etc.) the disk is ephemeral.
+ */
 import express from 'express';
+import helmet from 'helmet';
+import compression from 'compression';
+import rateLimit from 'express-rate-limit';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const app = express();
-const PORT = 3000;
-const HOST = '0.0.0.0';
+/* =========================================================================
+   CONFIGURATION
+   ========================================================================= */
+const IS_PROD = process.env.NODE_ENV === 'production';
+const PORT = Number.parseInt(process.env.PORT || '3000', 10);
+const HOST = process.env.HOST || '0.0.0.0';
+const SITE_URL = (process.env.SITE_URL || (IS_PROD ? '' : `http://localhost:${PORT}`)).replace(/\/+$/, '');
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const DATA_FILE = path.resolve(process.env.DATA_FILE || path.join(__dirname, 'data', 'data_store.json'));
+const SESSION_TTL_MS = Number.parseInt(process.env.SESSION_TTL_HOURS || '168', 10) * 60 * 60 * 1000;
+const PROMO_CODES = (process.env.PROMO_CODES || 'MMWELCOME,SAVE50,UBER50,FIRSTWASH,MM50,WELCOME50')
+  .split(',').map((c) => c.trim().toUpperCase()).filter(Boolean);
+const PROMO_DISCOUNT = 50;
 
-// Production Security & Performance Headers (TEO & SEO Standards)
-app.use((req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-XSS-Protection', '1; mode=block');
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  // Allow caching for static files while keeping API responses fresh
-  if (req.path.startsWith('/api/')) {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  } else if (req.path.match(/\.(jpg|jpeg|png|webp|svg|ico)$/)) {
-    res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+// TRUST_PROXY: number of reverse-proxy hops in front of the app (Cloud Run /
+// Render / Fly / Nginx = 1). Required so rate limiting sees the real client IP.
+function parseTrustProxy(v) {
+  if (v === undefined || v === '') return IS_PROD ? 1 : false;
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  if (/^\d+$/.test(v)) return Number(v);
+  return v; // e.g. "loopback, 10.0.0.0/8"
+}
+const TRUST_PROXY = parseTrustProxy(process.env.TRUST_PROXY);
+
+function assertConfig() {
+  const problems = [];
+  if (!Number.isInteger(PORT) || PORT <= 0 || PORT > 65535) problems.push('PORT must be a valid port number');
+  if (IS_PROD) {
+    if (!/^https:\/\/[^/]+$/.test(SITE_URL)) problems.push('SITE_URL must be set to the public https origin, e.g. https://www.example.co.za');
+    if (ADMIN_TOKEN.length < 32) problems.push('ADMIN_TOKEN must be set to a random secret of at least 32 characters');
   }
-  next();
-});
+  if (problems.length) {
+    console.error('Refusing to start — configuration errors:\n  - ' + problems.join('\n  - '));
+    process.exit(1);
+  }
+  if (!IS_PROD && !ADMIN_TOKEN) {
+    console.warn('[warn] ADMIN_TOKEN not set: admin endpoints are disabled.');
+  }
+}
+assertConfig();
 
-app.use(express.json());
-
-// Explicit SEO & PWA Routes with strict MIME types
-app.get('/robots.txt', (req, res) => {
-  res.type('text/plain');
-  res.sendFile(path.join(__dirname, 'robots.txt'));
-});
-
-app.get('/sitemap.xml', (req, res) => {
-  res.type('application/xml');
-  res.sendFile(path.join(__dirname, 'sitemap.xml'));
-});
-
-app.get('/manifest.json', (req, res) => {
-  res.type('application/manifest+json');
-  res.sendFile(path.join(__dirname, 'manifest.json'));
-});
-
-app.get('/sw.js', (req, res) => {
-  res.type('application/javascript');
-  res.setHeader('Service-Worker-Allowed', '/');
-  res.sendFile(path.join(__dirname, 'sw.js'));
-});
-
-app.get('/app.js', (req, res) => {
-  res.type('application/javascript');
-  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
-  res.sendFile(path.join(__dirname, 'app.js'));
-});
-
-app.get('/styles.css', (req, res) => {
-  res.type('text/css');
-  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
-  res.sendFile(path.join(__dirname, 'styles.css'));
-});
-
-app.use(express.static(__dirname));
-
-// Persistent DB file
-const DB_FILE = path.join(__dirname, 'data_store.json');
-
-// Initialize store with clean empty data structure
+/* =========================================================================
+   DATA STORE (JSON file, atomic writes, single process)
+   ========================================================================= */
 function getInitialData() {
+  const policy = 'Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets';
   return {
     users: [],
     orders: [],
     driverApplications: [],
+    laundromatApplications: [],
     laundromatPartners: [
-      {
-        id: "lnd_cpt_1",
-        businessName: "Kloof Street Laundromat & Garment Care",
-        address: "48 Kloof Street, Gardens",
-        city: "Cape Town",
-        suburb: "Gardens & City Bowl",
-        status: "Active",
-        rating: 4.9,
-        turnaround: "24 Hours Standard",
-        specialties: "Everyday Wash & Fold, Sneakers Care, Infant Sensitive",
-        pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets",
-        services: ["wash_fold", "iron_press", "sneakers", "blankets", "baby_clothes"]
-      },
-      {
-        id: "lnd_cpt_2",
-        businessName: "Atlantic Seaboard Laundry Hub",
-        address: "112 Regent Road, Sea Point",
-        city: "Cape Town",
-        suburb: "Sea Point, Camps Bay & Green Point",
-        status: "Active",
-        rating: 4.8,
-        turnaround: "Same-Day & 24h",
-        specialties: "Airbnb Linens, Blankets & Duvets, Carpets & Rugs",
-        pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets",
-        services: ["wash_fold", "blankets", "carpets", "sneakers", "dry_clean"]
-      },
-      {
-        id: "lnd_jhb_1",
-        businessName: "Rosebank Master Laundromat & Dry Cleaners",
-        address: "15 Tyrwhitt Avenue, Rosebank",
-        city: "Johannesburg",
-        suburb: "Rosebank, Parkhurst & Houghton",
-        status: "Active",
-        rating: 4.9,
-        turnaround: "24 Hours Standard",
-        specialties: "Suits & Dry Cleaning, Sneakers Deep Clean, Wash & Fold",
-        pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets",
-        services: ["wash_fold", "dry_clean", "sneakers", "iron_press", "blankets"]
-      },
-      {
-        id: "lnd_jhb_2",
-        businessName: "Sandton Elite Laundry & Commercial Wash",
-        address: "Sandton Drive & Rivonia Road, Sandhurst",
-        city: "Johannesburg",
-        suburb: "Sandton, Morningside & Bryanston",
-        status: "Active",
-        rating: 4.9,
-        turnaround: "12h Express & 24h Standard",
-        specialties: "Executive Shirts, Blankets & Duvets, Carpets & Area Rugs",
-        pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets",
-        services: ["wash_fold", "iron_press", "blankets", "carpets", "express"]
-      },
-      {
-        id: "lnd_dbn_1",
-        businessName: "Umhlanga Ridge Laundromat",
-        address: "Palm Boulevard, Gateway Precinct, Umhlanga",
-        city: "Durban / eThekwini",
-        suburb: "Umhlanga, Durban North & La Lucia",
-        status: "Active",
-        rating: 4.8,
-        turnaround: "24 Hours Standard",
-        specialties: "Holiday Linens, Blankets, Sneakers, Wash & Fold",
-        pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets",
-        services: ["wash_fold", "blankets", "sneakers", "carpets", "iron_press"]
-      },
-      {
-        id: "lnd_pta_1",
-        businessName: "Pretoria East Gentle Laundry & Press",
-        address: "Atterbury Road, Menlyn",
-        city: "Pretoria / Tshwane",
-        suburb: "Menlyn, Brooklyn & Faerie Glen",
-        status: "Active",
-        rating: 4.9,
-        turnaround: "24 Hours Standard",
-        specialties: "Steam Press, Hypoallergenic Wash, Blankets & Duvets",
-        pricingPolicy: "Rates determined by laundromat based on basket size and individual pricing for sneakers, blankets & carpets",
-        services: ["wash_fold", "iron_press", "blankets", "sneakers", "baby_clothes"]
-      }
+      { id: 'lnd_cpt_1', businessName: 'Kloof Street Laundromat & Garment Care', address: '48 Kloof Street, Gardens', city: 'Cape Town', suburb: 'Gardens & City Bowl', status: 'Active', rating: 4.9, turnaround: '24 Hours Standard', specialties: 'Everyday Wash & Fold, Sneakers Care, Infant Sensitive', pricingPolicy: policy, services: ['wash_fold', 'iron_press', 'sneakers', 'blankets', 'baby_clothes'] },
+      { id: 'lnd_cpt_2', businessName: 'Atlantic Seaboard Laundry Hub', address: '112 Regent Road, Sea Point', city: 'Cape Town', suburb: 'Sea Point, Camps Bay & Green Point', status: 'Active', rating: 4.8, turnaround: 'Same-Day & 24h', specialties: 'Airbnb Linens, Blankets & Duvets, Carpets & Rugs', pricingPolicy: policy, services: ['wash_fold', 'blankets', 'carpets', 'sneakers', 'dry_clean'] },
+      { id: 'lnd_jhb_1', businessName: 'Rosebank Master Laundromat & Dry Cleaners', address: '15 Tyrwhitt Avenue, Rosebank', city: 'Johannesburg', suburb: 'Rosebank, Parkhurst & Houghton', status: 'Active', rating: 4.9, turnaround: '24 Hours Standard', specialties: 'Suits & Dry Cleaning, Sneakers Deep Clean, Wash & Fold', pricingPolicy: policy, services: ['wash_fold', 'dry_clean', 'sneakers', 'iron_press', 'blankets'] },
+      { id: 'lnd_jhb_2', businessName: 'Sandton Elite Laundry & Commercial Wash', address: 'Sandton Drive & Rivonia Road, Sandhurst', city: 'Johannesburg', suburb: 'Sandton, Morningside & Bryanston', status: 'Active', rating: 4.9, turnaround: '12h Express & 24h Standard', specialties: 'Executive Shirts, Blankets & Duvets, Carpets & Area Rugs', pricingPolicy: policy, services: ['wash_fold', 'iron_press', 'blankets', 'carpets', 'express'] },
+      { id: 'lnd_dbn_1', businessName: 'Umhlanga Ridge Laundromat', address: 'Palm Boulevard, Gateway Precinct, Umhlanga', city: 'Durban / eThekwini', suburb: 'Umhlanga, Durban North & La Lucia', status: 'Active', rating: 4.8, turnaround: '24 Hours Standard', specialties: 'Holiday Linens, Blankets, Sneakers, Wash & Fold', pricingPolicy: policy, services: ['wash_fold', 'blankets', 'sneakers', 'carpets', 'iron_press'] },
+      { id: 'lnd_pta_1', businessName: 'Pretoria East Gentle Laundry & Press', address: 'Atterbury Road, Menlyn', city: 'Pretoria / Tshwane', suburb: 'Menlyn, Brooklyn & Faerie Glen', status: 'Active', rating: 4.9, turnaround: '24 Hours Standard', specialties: 'Steam Press, Hypoallergenic Wash, Blankets & Duvets', pricingPolicy: policy, services: ['wash_fold', 'iron_press', 'blankets', 'sneakers', 'baby_clothes'] }
     ],
     businessInquiries: [],
     supportTickets: []
   };
 }
 
+let db = null;
+let writeChain = Promise.resolve();
+let pendingWrite = false;
+
 function loadDB() {
   try {
-    if (fs.existsSync(DB_FILE)) {
-      const data = fs.readFileSync(DB_FILE, 'utf8');
-      return JSON.parse(data);
+    if (fs.existsSync(DATA_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+      const base = getInitialData();
+      for (const key of Object.keys(base)) {
+        if (!Array.isArray(parsed[key])) parsed[key] = key === 'laundromatPartners' ? base[key] : [];
+      }
+      return parsed;
     }
   } catch (err) {
-    console.error('Error reading DB, using initial data:', err);
+    // Never silently overwrite a corrupt store: that would destroy customer data.
+    console.error(`Data file ${DATA_FILE} is unreadable or corrupt; refusing to start.`, err.message);
+    process.exit(1);
   }
   const initial = getInitialData();
-  saveDB(initial);
+  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true, mode: 0o700 });
+  writeFileAtomicSync(DATA_FILE, JSON.stringify(initial, null, 2));
   return initial;
 }
 
-function saveDB(data) {
+function writeFileAtomicSync(file, contents) {
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  const fd = fs.openSync(tmp, 'w', 0o600);
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
-  } catch (err) {
-    console.error('Error writing DB:', err);
+    fs.writeFileSync(fd, contents, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
   }
+  fs.renameSync(tmp, file);
 }
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
-});
+// Serialise writes so concurrent requests can never interleave a partial file.
+function saveDB() {
+  if (pendingWrite) return writeChain;
+  pendingWrite = true;
+  writeChain = writeChain.then(() => new Promise((resolve) => {
+    setImmediate(() => {
+      pendingWrite = false;
+      try {
+        writeFileAtomicSync(DATA_FILE, JSON.stringify(db, null, 2));
+      } catch (err) {
+        console.error('Error writing data store:', err.message);
+      }
+      resolve();
+    });
+  }));
+  return writeChain;
+}
 
-// In-memory active tokens/sessions
-const sessions = new Map();
+db = loadDB();
 
-// Helper to get user from Auth header
-function getAuthenticatedUser(req) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return null;
+/* =========================================================================
+   HELPERS: validation, auth, ids
+   ========================================================================= */
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+const EMAIL_RE = /^[^\s@<>"']{1,64}@[^\s@<>"']{1,190}\.[a-z]{2,24}$/i;
+const PHONE_RE = /^\+?[0-9 ()-]{9,20}$/;
+const CONTROL_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+
+function str(value, { field, max = 200, required = false, multiline = false } = {}) {
+  if (value === undefined || value === null || value === '') {
+    if (required) throw new HttpError(400, `${field} is required`);
+    return '';
   }
-  const token = authHeader.split(' ')[1];
-  const userId = sessions.get(token);
-  if (!userId) return null;
-  const db = loadDB();
-  return db.users.find(u => u.id === userId) || null;
+  if (typeof value !== 'string' && typeof value !== 'number') throw new HttpError(400, `${field} must be text`);
+  let s = String(value).replace(CONTROL_RE, '').trim();
+  if (!multiline) s = s.replace(/[\r\n]+/g, ' '); // blocks header/email injection
+  if (required && !s) throw new HttpError(400, `${field} is required`);
+  if (s.length > max) throw new HttpError(400, `${field} must be at most ${max} characters`);
+  return s;
+}
+function email(value, required = true) {
+  const s = str(value, { field: 'Email', max: 254, required }).toLowerCase();
+  if (s && !EMAIL_RE.test(s)) throw new HttpError(400, 'Please enter a valid email address');
+  return s;
+}
+function phone(value, required = false) {
+  const s = str(value, { field: 'Phone', max: 20, required });
+  if (s && !PHONE_RE.test(s)) throw new HttpError(400, 'Please enter a valid phone number');
+  return s;
+}
+function requireConsent(body) {
+  if (body.consent !== true) {
+    throw new HttpError(400, 'Please confirm your consent to the processing of your personal information (POPIA).');
+  }
+  return { consentGiven: true, consentAt: new Date().toISOString() };
+}
+function oneOf(value, allowed, fallback) {
+  return allowed.includes(value) ? value : fallback;
+}
+function newId(prefix) {
+  return `${prefix}_${crypto.randomUUID()}`;
+}
+function timeLabel() {
+  return new Date().toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Johannesburg' });
+}
+
+// Password hashing with scrypt (no native deps). Format: scrypt$N$salt$hash
+const SCRYPT_N = 16384;
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(password, salt, 64, { N: SCRYPT_N });
+  return `scrypt$${SCRYPT_N}$${salt.toString('base64')}$${hash.toString('base64')}`;
+}
+function verifyPassword(password, stored) {
+  if (typeof stored !== 'string' || !stored.startsWith('scrypt$')) return false;
+  const [, n, saltB64, hashB64] = stored.split('$');
+  const expected = Buffer.from(hashB64, 'base64');
+  const actual = crypto.scryptSync(password, Buffer.from(saltB64, 'base64'), expected.length, { N: Number(n) });
+  return crypto.timingSafeEqual(actual, expected);
+}
+// Burn comparable CPU for unknown emails to limit user enumeration via timing.
+const DUMMY_HASH = hashPassword(crypto.randomBytes(16).toString('hex'));
+
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+// Sessions are in memory: they are lost on restart and not shared across
+// instances. TODO for owner: move to a DB/Redis-backed session store.
+const sessions = new Map(); // tokenHash -> { userId, expiresAt }
+const tokenHash = (t) => crypto.createHash('sha256').update(t).digest('hex');
+
+function createSession(userId) {
+  const token = crypto.randomBytes(32).toString('base64url');
+  sessions.set(tokenHash(token), { userId, expiresAt: Date.now() + SESSION_TTL_MS });
+  return token;
+}
+function bearer(req) {
+  const h = req.headers.authorization;
+  if (typeof h !== 'string' || !h.startsWith('Bearer ')) return null;
+  const t = h.slice(7).trim();
+  return t && t.length <= 200 ? t : null;
+}
+function getAuthenticatedUser(req) {
+  const token = bearer(req);
+  if (!token) return null;
+  const key = tokenHash(token);
+  const s = sessions.get(key);
+  if (!s) return null;
+  if (s.expiresAt < Date.now()) { sessions.delete(key); return null; }
+  return db.users.find((u) => u.id === s.userId) || null;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, s] of sessions) if (s.expiresAt < now) sessions.delete(k);
+}, 60 * 60 * 1000).unref();
+
+function requireUser(req, res, next) {
+  const user = getAuthenticatedUser(req);
+  if (!user) return res.status(401).json({ error: 'Please sign in to continue.' });
+  req.user = user;
+  next();
+}
+function isAdminRequest(req) {
+  if (!ADMIN_TOKEN) return false;
+  const supplied = req.get('x-admin-token') || bearer(req);
+  return typeof supplied === 'string' && safeEqual(supplied, ADMIN_TOKEN);
+}
+function requireAdmin(req, res, next) {
+  if (!isAdminRequest(req)) return res.status(401).json({ error: 'Admin authentication required' });
+  next();
+}
+
+function publicUser(u) {
+  const { passwordHash: _h, password: _p, ...safe } = u;
+  return safe;
 }
 
 /* =========================================================================
-   AUTH ROUTES
+   APP & MIDDLEWARE
    ========================================================================= */
+const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', TRUST_PROXY);
 
-app.post('/api/auth/signup', (req, res) => {
-  const { name, email, password, phone, role, address } = req.body;
-  if (!name || !email || !password) {
-    return res.status(400).json({ error: 'Name, email, and password are required' });
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      defaultSrc: ["'self'"],
+      // 'unsafe-inline' is required because index.html/app.js use inline on*
+      // event handlers. TODO: migrate to addEventListener and drop it.
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrcAttr: ["'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      connectSrc: ["'self'"],
+      manifestSrc: ["'self'"],
+      workerSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+      frameAncestors: ["'none'"],
+      ...(IS_PROD ? { upgradeInsecureRequests: [] } : {})
+    }
+  },
+  strictTransportSecurity: IS_PROD ? { maxAge: 31536000, includeSubDomains: true } : false,
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  crossOriginEmbedderPolicy: false,
+  frameguard: { action: 'deny' }
+}));
+app.use((req, res, next) => {
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()');
+  next();
+});
+app.use(compression());
+
+// API hygiene: no caching, JSON only, small bodies.
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const hasBody = Number(req.headers['content-length'] || 0) > 0 || req.headers['transfer-encoding'];
+  // Requiring application/json on bodies also blocks cross-site HTML form posts (CSRF/spam).
+  if (hasBody && !req.is('application/json')) {
+    return res.status(415).json({ error: 'Content-Type must be application/json' });
   }
+  next();
+});
+app.use('/api', express.json({ limit: '16kb', strict: true }));
 
-  const db = loadDB();
-  const existing = db.users.find(u => u.email.toLowerCase() === email.toLowerCase());
-  if (existing) {
-    return res.status(409).json({ error: 'An account with this email already exists' });
+const limiterOpts = { standardHeaders: 'draft-7', legacyHeaders: false };
+const apiLimiter = rateLimit({ ...limiterOpts, windowMs: 15 * 60 * 1000, limit: 300 });
+const authLimiter = rateLimit({ ...limiterOpts, windowMs: 15 * 60 * 1000, limit: 20, message: { error: 'Too many attempts. Please try again in 15 minutes.' } });
+const formLimiter = rateLimit({ ...limiterOpts, windowMs: 60 * 60 * 1000, limit: 15, message: { error: 'Too many submissions. Please try again later.' } });
+app.use('/api', apiLimiter);
+
+/* =========================================================================
+   STATIC FILES (explicit allow-list — never serve the project root)
+   ========================================================================= */
+function readTemplate(file) {
+  return fs.readFileSync(path.join(__dirname, file), 'utf8').replaceAll('__SITE_URL__', SITE_URL);
+}
+const INDEX_HTML = readTemplate('index.html');
+const ROBOTS_TXT = readTemplate('robots.txt');
+const SITEMAP_XML = readTemplate('sitemap.xml');
+const SPA_ROUTES = new Set(['/', '/services', '/how-it-works', '/about', '/faq', '/contact', '/business', '/book', '/orders', '/account', '/account/addresses', '/login', '/signup', '/forgot-password']);
+const NOINDEX_PREFIXES = ['/orders', '/account', '/login', '/signup', '/forgot-password'];
+
+function sendIndex(req, res, status = 200) {
+  const p = req.path.replace(/\/+$/, '') || '/';
+  const canonicalPath = SPA_ROUTES.has(p) ? (p === '/' ? '/' : p) : '/';
+  let html = INDEX_HTML.replace(
+    `<link rel="canonical" href="${SITE_URL}/">`,
+    `<link rel="canonical" href="${SITE_URL}${canonicalPath}">`
+  );
+  if (NOINDEX_PREFIXES.some((x) => p === x || p.startsWith(x + '/')) || status !== 200) {
+    html = html.replace(/<meta name="robots" content="[^"]*">/, '<meta name="robots" content="noindex, nofollow">');
+  }
+  res.status(status).type('html').setHeader('Cache-Control', 'no-cache');
+  res.send(html);
+}
+
+app.get('/robots.txt', (req, res) => res.type('text/plain').send(ROBOTS_TXT));
+app.get('/sitemap.xml', (req, res) => res.type('application/xml').send(SITEMAP_XML));
+app.get('/manifest.json', (req, res) => {
+  res.type('application/manifest+json').setHeader('Cache-Control', 'public, max-age=3600');
+  res.sendFile(path.join(__dirname, 'manifest.json'));
+});
+app.get('/sw.js', (req, res) => {
+  res.type('application/javascript');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.sendFile(path.join(__dirname, 'sw.js'));
+});
+app.get('/app.js', (req, res) => {
+  res.type('application/javascript').setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(__dirname, 'app.js'));
+});
+app.get('/styles.css', (req, res) => {
+  res.type('text/css').setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(__dirname, 'styles.css'));
+});
+app.use('/src/assets', express.static(path.join(__dirname, 'src', 'assets'), {
+  dotfiles: 'deny',
+  index: false,
+  redirect: false,
+  maxAge: '7d'
+}));
+
+/* =========================================================================
+   HEALTH
+   ========================================================================= */
+app.get('/healthz', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ status: 'ok' });
+});
+app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+
+/* =========================================================================
+   AUTH
+   ========================================================================= */
+function handleSignup(req, res) {
+  const b = req.body || {};
+  const name = str(b.name, { field: 'Name', max: 100, required: true });
+  const mail = email(b.email);
+  const tel = phone(b.phone);
+  const address = str(b.address, { field: 'Address', max: 300 });
+  if (typeof b.password !== 'string' || b.password.length < 8 || b.password.length > 200) {
+    throw new HttpError(400, 'Password must be between 8 and 200 characters');
+  }
+  const consent = requireConsent(b);
+
+  if (db.users.some((u) => u.email === mail)) {
+    // TODO for owner: once email is wired up, respond identically and email the
+    // existing account holder instead, to avoid account enumeration.
+    throw new HttpError(409, 'An account with this email already exists');
   }
 
   const newUser = {
-    id: 'usr_' + Date.now(),
-    name: name.trim(),
-    email: email.toLowerCase().trim(),
-    password: password, // In production, bcrypt hash
-    phone: phone ? phone.trim() : '',
-    role: role || 'customer',
-    address: address ? address.trim() : '',
-    savedAddresses: address ? [{ label: 'Primary', address: address.trim() }] : [],
-    preferences: {
-      detergent: 'Hypoallergenic (Eco)',
-      temperature: 'Cold wash',
-      foldStyle: 'Standard fold'
-    },
+    id: newId('usr'),
+    name,
+    email: mail,
+    passwordHash: hashPassword(b.password),
+    phone: tel,
+    role: 'customer', // never taken from the request body
+    address,
+    savedAddresses: address ? [{ id: newId('addr'), label: 'Primary', address }] : [],
+    preferences: { detergent: 'Hypoallergenic (Eco)', temperature: 'Cold wash', foldStyle: 'Standard fold' },
+    ...consent,
     createdAt: new Date().toISOString()
   };
-
   db.users.push(newUser);
-  saveDB(db);
+  saveDB();
+  const token = createSession(newUser.id);
+  res.status(201).json({ user: publicUser(newUser), token });
+}
+app.post('/api/auth/signup', authLimiter, handleSignup);
+app.post('/api/auth/register', authLimiter, handleSignup);
 
-  const token = 'tok_' + Math.random().toString(36).substring(2) + Date.now();
-  sessions.set(token, newUser.id);
-
-  const { password: _, ...safeUser } = newUser;
-  res.json({ user: safeUser, token });
+app.post('/api/auth/login', authLimiter, (req, res) => {
+  const b = req.body || {};
+  const mail = typeof b.email === 'string' ? b.email.trim().toLowerCase() : '';
+  const pw = typeof b.password === 'string' ? b.password : '';
+  if (!mail || !pw || pw.length > 200) throw new HttpError(400, 'Email and password are required');
+  const user = db.users.find((u) => u.email === mail);
+  const ok = user ? verifyPassword(pw, user.passwordHash) : (verifyPassword(pw, DUMMY_HASH), false);
+  if (!ok) throw new HttpError(401, 'Invalid email or password');
+  const token = createSession(user.id);
+  res.json({ user: publicUser(user), token });
 });
 
-// Alias register to signup
-app.post('/api/auth/register', (req, res) => {
-  const { name, email, password, phone, role, address } = req.body;
-  if (!name || !email || !password) {
-    return res.status(400).json({ error: 'Name, email, and password are required' });
-  }
-
-  const db = loadDB();
-  const existing = db.users.find(u => u.email.toLowerCase() === email.toLowerCase());
-  if (existing) {
-    return res.status(409).json({ error: 'An account with this email already exists' });
-  }
-
-  const newUser = {
-    id: 'usr_' + Date.now(),
-    name: name.trim(),
-    email: email.toLowerCase().trim(),
-    password: password,
-    phone: phone ? phone.trim() : '',
-    role: role || 'customer',
-    address: address ? address.trim() : '',
-    savedAddresses: address ? [{ label: 'Primary', address: address.trim() }] : [],
-    preferences: {
-      detergent: 'Hypoallergenic (Eco)',
-      temperature: 'Cold wash',
-      foldStyle: 'Standard fold'
-    },
-    createdAt: new Date().toISOString()
-  };
-
-  db.users.push(newUser);
-  saveDB(db);
-
-  const token = 'tok_' + Math.random().toString(36).substring(2) + Date.now();
-  sessions.set(token, newUser.id);
-
-  const { password: _, ...safeUser } = newUser;
-  res.json({ user: safeUser, token });
-});
-
-app.post('/api/auth/login', (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required' });
-  }
-
-  const db = loadDB();
-  const user = db.users.find(u => u.email.toLowerCase() === email.toLowerCase());
-  if (!user || user.password !== password) {
-    return res.status(401).json({ error: 'Invalid email or password' });
-  }
-
-  const token = 'tok_' + Math.random().toString(36).substring(2) + Date.now();
-  sessions.set(token, user.id);
-
-  const { password: _, ...safeUser } = user;
-  res.json({ user: safeUser, token });
-});
-
-app.get('/api/auth/me', (req, res) => {
-  const user = getAuthenticatedUser(req);
-  if (!user) {
-    return res.status(401).json({ error: 'Unauthorized or session expired' });
-  }
-  const { password: _, ...safeUser } = user;
-  res.json({ user: safeUser });
-});
+app.get('/api/auth/me', requireUser, (req, res) => res.json({ user: publicUser(req.user) }));
 
 app.post('/api/auth/logout', (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-    sessions.delete(token);
-  }
+  const t = bearer(req);
+  if (t) sessions.delete(tokenHash(t));
   res.json({ success: true });
 });
 
-app.post('/api/auth/forgot-password', (req, res) => {
-  const { email } = req.body;
-  if (!email) {
-    return res.status(400).json({ error: 'Email address is required' });
-  }
-  const db = loadDB();
-  const user = db.users.find(u => u.email.toLowerCase() === email.toLowerCase());
-  // Even if user not found, return friendly message for security
-  res.json({
-    success: true,
-    message: `If an account exists for ${email}, a password reset verification link has been dispatched.`
-  });
+app.post('/api/auth/forgot-password', authLimiter, (req, res) => {
+  email(req.body?.email);
+  // TODO for owner: generate a single-use, expiring reset token and send it via a
+  // transactional email provider. Never echo the submitted address back.
+  res.json({ success: true, message: 'If an account exists for that email, a reset link will be sent.' });
 });
 
 /* =========================================================================
-   USER PROFILE & ADDRESS MANAGEMENT (PARITY)
+   USER PROFILE & ADDRESSES
    ========================================================================= */
+app.get('/api/user/profile', requireUser, (req, res) => res.json({ success: true, user: publicUser(req.user) }));
 
-app.get('/api/user/profile', (req, res) => {
-  const user = getAuthenticatedUser(req);
-  if (!user) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  const { password: _, ...safeUser } = user;
-  res.json({ success: true, user: safeUser });
-});
-
-app.put('/api/user/profile', (req, res) => {
-  const user = getAuthenticatedUser(req);
-  if (!user) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  const { name, phone, address, preferences, defaultPayment } = req.body;
-  const db = loadDB();
-  const targetUser = db.users.find(u => u.id === user.id);
-  if (!targetUser) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-
-  if (name) targetUser.name = name.trim();
-  if (phone !== undefined) targetUser.phone = phone.trim();
-  if (address) {
-    targetUser.address = address.trim();
-    if (!targetUser.savedAddresses) targetUser.savedAddresses = [];
-    if (!targetUser.savedAddresses.some(sa => sa.address === address.trim())) {
-      targetUser.savedAddresses.push({ label: 'Primary', address: address.trim() });
+const PREF_KEYS = ['detergent', 'temperature', 'foldStyle', 'notifications', 'theme', 'payment'];
+app.put('/api/user/profile', requireUser, (req, res) => {
+  const b = req.body || {};
+  const u = req.user;
+  if (b.name !== undefined) u.name = str(b.name, { field: 'Name', max: 100, required: true });
+  if (b.phone !== undefined) u.phone = phone(b.phone);
+  if (b.address) {
+    const address = str(b.address, { field: 'Address', max: 300 });
+    u.address = address;
+    if (!Array.isArray(u.savedAddresses)) u.savedAddresses = [];
+    if (!u.savedAddresses.some((sa) => sa.address === address) && u.savedAddresses.length < 20) {
+      u.savedAddresses.push({ id: newId('addr'), label: 'Primary', address });
     }
   }
-  if (preferences) {
-    targetUser.preferences = { ...targetUser.preferences, ...preferences };
+  if (b.preferences && typeof b.preferences === 'object' && !Array.isArray(b.preferences)) {
+    const prefs = { ...(u.preferences || {}) };
+    for (const k of PREF_KEYS) {
+      if (b.preferences[k] !== undefined) prefs[k] = str(b.preferences[k], { field: k, max: 60 });
+    }
+    u.preferences = prefs;
   }
-  if (defaultPayment) {
-    targetUser.defaultPayment = defaultPayment;
-  }
-
-  saveDB(db);
-  const { password: _, ...safeUser } = targetUser;
-  res.json({ success: true, user: safeUser, message: 'Profile & preferences updated successfully.' });
+  if (b.defaultPayment !== undefined) u.defaultPayment = str(b.defaultPayment, { field: 'Default payment', max: 60 });
+  saveDB();
+  res.json({ success: true, user: publicUser(u), message: 'Profile & preferences updated successfully.' });
 });
 
-app.post('/api/user/addresses', (req, res) => {
-  const user = getAuthenticatedUser(req);
-  if (!user) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  const { label, address } = req.body;
-  if (!address || !address.trim()) {
-    return res.status(400).json({ error: 'Address is required' });
-  }
-
-  const db = loadDB();
-  const targetUser = db.users.find(u => u.id === user.id);
-  if (!targetUser) return res.status(404).json({ error: 'User not found' });
-
-  if (!Array.isArray(targetUser.savedAddresses)) {
-    targetUser.savedAddresses = [];
-  }
-
-  const newAddr = {
-    id: 'addr_' + Date.now(),
-    label: (label || 'Home').trim(),
-    address: address.trim()
-  };
-
-  targetUser.savedAddresses.push(newAddr);
-  if (!targetUser.address) {
-    targetUser.address = newAddr.address;
-  }
-
-  saveDB(db);
-  res.json({ success: true, savedAddresses: targetUser.savedAddresses, message: 'New address saved to your account.' });
+app.post('/api/user/addresses', requireUser, (req, res) => {
+  const b = req.body || {};
+  const address = str(b.address, { field: 'Address', max: 300, required: true });
+  const label = str(b.label, { field: 'Label', max: 40 }) || 'Home';
+  const u = req.user;
+  if (!Array.isArray(u.savedAddresses)) u.savedAddresses = [];
+  if (u.savedAddresses.length >= 20) throw new HttpError(400, 'You can save up to 20 addresses');
+  u.savedAddresses.push({ id: newId('addr'), label, address });
+  if (!u.address) u.address = address;
+  saveDB();
+  res.json({ success: true, savedAddresses: u.savedAddresses, message: 'New address saved to your account.' });
 });
 
-app.delete('/api/user/addresses/:id', (req, res) => {
-  const user = getAuthenticatedUser(req);
-  if (!user) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const db = loadDB();
-  const targetUser = db.users.find(u => u.id === user.id);
-  if (!targetUser || !Array.isArray(targetUser.savedAddresses)) {
-    return res.status(404).json({ error: 'Address not found' });
-  }
-
-  targetUser.savedAddresses = targetUser.savedAddresses.filter(sa => sa.id !== req.params.id && sa.address !== req.params.id);
-  saveDB(db);
-  res.json({ success: true, savedAddresses: targetUser.savedAddresses, message: 'Address removed.' });
+app.delete('/api/user/addresses/:id', requireUser, (req, res) => {
+  const u = req.user;
+  const id = String(req.params.id).slice(0, 300);
+  if (!Array.isArray(u.savedAddresses)) throw new HttpError(404, 'Address not found');
+  u.savedAddresses = u.savedAddresses.filter((sa) => sa.id !== id && sa.address !== id);
+  saveDB();
+  res.json({ success: true, savedAddresses: u.savedAddresses, message: 'Address removed.' });
 });
 
 /* =========================================================================
-   LIVE CUSTOMER SUPPORT CHAT & HELP DESK (PARITY)
+   SUPPORT
    ========================================================================= */
-
-app.post('/api/support/message', (req, res) => {
-  const { message, orderId, email, name } = req.body;
-  if (!message || !message.trim()) {
-    return res.status(400).json({ error: 'Message cannot be empty' });
-  }
-
-  const db = loadDB();
-  if (!Array.isArray(db.supportTickets)) {
-    db.supportTickets = [];
-  }
+app.post('/api/support/message', formLimiter, (req, res) => {
+  const b = req.body || {};
+  const user = getAuthenticatedUser(req);
+  const message = str(b.message, { field: 'Message', max: 2000, required: true, multiline: true });
+  const orderId = str(b.orderId, { field: 'Order ID', max: 40 }) || null;
+  const name = user ? user.name : (str(b.name, { field: 'Name', max: 100 }) || 'Guest');
+  const mail = user ? user.email : (b.email && b.email !== 'guest@client.co.za' ? email(b.email) : '');
+  const tel = user ? user.phone : phone(b.phone);
+  const reason = str(b.reason, { field: 'Subject', max: 80 });
+  // Anonymous visitors who leave contact details must consent (POPIA s11/s18).
+  const consent = !user && (mail || tel) ? requireConsent(b) : {};
 
   const ticket = {
-    id: 'tkt_' + Date.now(),
-    customerName: name || 'Valued Customer',
-    customerEmail: email || 'guest@client.co.za',
-    orderId: orderId || null,
-    message: message.trim(),
+    id: newId('tkt'),
+    userId: user ? user.id : null,
+    customerName: name,
+    customerEmail: mail,
+    customerPhone: tel,
+    subject: reason,
+    orderId,
+    message,
+    ...consent,
     createdAt: new Date().toISOString()
   };
   db.supportTickets.push(ticket);
-  saveDB(db);
+  saveDB();
+  // TODO for owner: forward tickets to a help-desk / email inbox.
 
-  // Contextual smart response algorithm
   const lowerMsg = message.toLowerCase();
-  let reply = "Thanks for reaching out! Our dedicated M&M South Africa operations team is on duty. How can we assist you with your pickup or wash today?";
-
+  let reply = 'Thanks for reaching out! Our M&M operations team will get back to you shortly.';
   if (lowerMsg.includes('track') || lowerMsg.includes('where is') || lowerMsg.includes('status')) {
-    if (orderId) {
-      const order = db.orders.find(o => o.id === orderId);
-      if (order) {
-        reply = `Order #${order.id} is currently in the **${order.status.toUpperCase()}** stage. Driver ${order.driver ? order.driver.name : 'assigned'} is managing your route. Handover PIN: **${order.deliveryPin || '4921'}**.`;
-      } else {
-        reply = `I couldn't locate order #${orderId}. Please check the ID in 'My Orders' or view your active wash tracker!`;
-      }
-    } else {
-      reply = "To track an active order, click 'Track wash' in the menu or tap the Live Tracker to see real-time washer cycle telemetry and driver ETA.";
-    }
-  } else if (lowerMsg.includes('weight') || lowerMsg.includes('kg') || lowerMsg.includes('scale') || lowerMsg.includes('basket') || lowerMsg.includes('sneaker') || lowerMsg.includes('blanket') || lowerMsg.includes('carpet')) {
-    reply = "Partner laundromats price everyday laundry by basket size (Small, Medium, or Large Basket) and provide individual item pricing for specialty items like sneakers, blankets, and carpets. You select your preferred local partner laundromat when scheduling your pickup!";
-  } else if (lowerMsg.includes('detergent') || lowerMsg.includes('sensitive') || lowerMsg.includes('baby')) {
-    reply = "We offer 100% plant-based, fragrance-free hypoallergenic detergent, standard fresh breeze detergent, and optional eco fabric softener. You can customize this in your order preferences.";
-  } else if (lowerMsg.includes('cancel') || lowerMsg.includes('change time') || lowerMsg.includes('reschedule')) {
-    reply = "Pickups can be rescheduled or cancelled free of charge up to 2 hours before the scheduled window. You can also contact dispatch at +27 21 555 4321.";
-  } else if (lowerMsg.includes('pin') || lowerMsg.includes('handover') || lowerMsg.includes('security')) {
-    reply = "For your security, every order generates a unique 4-digit Handover PIN. Share this PIN with the courier when handing over bags or receiving your clean clothes.";
-  } else if (lowerMsg.includes('price') || lowerMsg.includes('cost') || lowerMsg.includes('how much') || lowerMsg.includes('rate')) {
-    reply = "Only partner laundromats set their prices. Pricing is based on your selected basket size (Small, Medium, Family) and individual item rates for sneakers, blankets, carpets, and dry cleaning. Select a partner laundromat when scheduling pickup to see their tariffs!";
+    // Only disclose order details to the signed-in owner of the order.
+    const order = user && orderId ? db.orders.find((o) => o.id === orderId && o.userId === user.id) : null;
+    reply = order
+      ? `Order #${order.id} is currently in the ${String(order.status).replace(/_/g, ' ').toUpperCase()} stage. Your handover PIN is shown in your order tracker.`
+      : "To track an order, sign in and open 'My Orders' to see its live status.";
+  } else if (/weight|kg|scale|basket|sneaker|blanket|carpet/.test(lowerMsg)) {
+    reply = 'Partner laundromats price everyday laundry by basket size and provide individual item pricing for sneakers, blankets and carpets. You choose your partner laundromat when scheduling a pickup.';
+  } else if (/detergent|sensitive|baby/.test(lowerMsg)) {
+    reply = 'We offer plant-based, fragrance-free hypoallergenic detergent, standard detergent, and optional eco fabric softener. You can set this in your order preferences.';
+  } else if (/cancel|change time|reschedule/.test(lowerMsg)) {
+    reply = 'Pickups can be rescheduled or cancelled free of charge up to 2 hours before the scheduled window from your order tracker.';
+  } else if (/pin|handover|security/.test(lowerMsg)) {
+    reply = 'Every order has a unique 4-digit handover PIN. Share it with the courier only when handing over or receiving your laundry.';
+  } else if (/price|cost|how much|rate/.test(lowerMsg)) {
+    reply = 'Pricing is based on basket size or item count and the rates of your selected partner laundromat. The amount is shown before you book.';
   }
-
-  res.json({
-    success: true,
-    ticketId: ticket.id,
-    reply,
-    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  });
+  res.json({ success: true, ticketId: ticket.id, reply, timestamp: timeLabel() });
 });
 
 /* =========================================================================
-   ORDERS ROUTES
+   PRICING (server is the source of truth for order amounts)
    ========================================================================= */
-
-app.get('/api/orders', (req, res) => {
-  const user = getAuthenticatedUser(req);
-  if (!user) {
-    return res.status(401).json({ error: 'Please sign in or create an account to view orders' });
+// Partner laundromat tariffs: everyday laundry is billed per basket size, specialty items per piece/pair.
+// Keep in sync with wizardCalculatePricing() in app.js (the client only displays; this decides the amount).
+const BASKET_TARIFF = { small: 140, medium: 220, large: 310, family: 430 };
+const BASKET_LABELS = { small: 'Small basket', medium: 'Medium basket', large: 'Large basket', family: 'Family basket' };
+const SERVICE_RATES = {
+  wash_fold: { name: 'Wash & Fold (Everyday Clothes)', pricing: 'basket' },
+  iron_press: { name: 'Wash & Steam Table Press', pricing: 'basket' },
+  baby_clothes: { name: 'Infant & Sensitive Skin Care', pricing: 'basket' },
+  express: { name: 'Express Rush (Same-Day 12h)', pricing: 'basket' },
+  sneakers: { name: 'Sneakers & Footwear Deep Clean', pricing: 'item', rate: 125, unit: 'pair', max: 20 },
+  blankets: { name: 'Blankets, Duvets & Heavy Bedding', pricing: 'item', rate: 130, unit: 'item', max: 20 },
+  carpets: { name: 'Carpets & Area Rugs', pricing: 'item', rate: 180, unit: 'item', max: 10 },
+  dry_clean: { name: 'Suits & Tailored Dry Cleaning', pricing: 'item', rate: 115, unit: 'item', max: 25 }
+};
+function resolveServiceKey(b) {
+  for (const candidate of [b.serviceKey, b.service, b.serviceType]) {
+    if (typeof candidate !== 'string') continue;
+    if (SERVICE_RATES[candidate]) return candidate;
+    const byName = Object.keys(SERVICE_RATES).find((k) => SERVICE_RATES[k].name === candidate);
+    if (byName) return byName;
   }
-  const db = loadDB();
-  const userOrders = db.orders.filter(o => o.userId === user.id);
-  res.json({ orders: userOrders });
+  return null;
+}
+function quote({ serviceKey, quantity, sizeValue, promoCode }) {
+  const svc = SERVICE_RATES[serviceKey];
+  let qty, subtotal, unit;
+  if (svc.pricing === 'item') {
+    qty = Number(quantity);
+    if (!Number.isFinite(qty) || qty <= 0) qty = sizeValue === 'multiple_items' ? 2 : 1;
+    qty = Math.min(Math.max(Math.round(qty), 1), svc.max);
+    subtotal = qty * svc.rate;
+    unit = svc.unit;
+  } else {
+    const size = oneOf(sizeValue, Object.keys(BASKET_TARIFF), 'medium');
+    qty = 1;
+    subtotal = BASKET_TARIFF[size];
+    unit = BASKET_LABELS[size].toLowerCase();
+  }
+  subtotal = +subtotal.toFixed(2);
+  const deliveryFee = subtotal >= 350 ? 0 : 45;
+  const code = typeof promoCode === 'string' ? promoCode.trim().toUpperCase().slice(0, 30) : '';
+  const discount = code && PROMO_CODES.includes(code) ? PROMO_DISCOUNT : 0;
+  const total = Math.max(0, +(subtotal + deliveryFee - discount).toFixed(2));
+  const beforeVat = +(total / 1.15).toFixed(2);
+  const vat = +(total - beforeVat).toFixed(2);
+  return { serviceName: svc.name, quantity: qty, unit, subtotal, deliveryFee, discount, promoCode: discount ? code : '', total, beforeVat, vat };
+}
+const describeLoad = (q) => (q.unit.endsWith('basket') ? q.unit[0].toUpperCase() + q.unit.slice(1) : `${q.quantity} ${q.unit}${q.quantity > 1 ? 's' : ''}`);
+
+app.post('/api/pricing/calculate', (req, res) => {
+  const b = req.body || {};
+  const serviceKey = resolveServiceKey(b) || 'wash_fold';
+  const q = quote({ serviceKey, quantity: b.quantity, sizeValue: b.sizeValue, promoCode: b.promoCode });
+  res.json({ ...q, weightText: describeLoad(q), currency: 'ZAR', symbol: 'R' });
+});
+
+/* =========================================================================
+   ORDERS
+   ========================================================================= */
+const ORDER_STEPS = [
+  { key: 'placed', label: 'Order Confirmed', desc: 'Order placed and logged in system.' },
+  { key: 'assigned', label: 'Driver Dispatched', desc: 'Local courier dispatched to your address.' },
+  { key: 'picked_up', label: 'Picked Up & Verified', desc: 'Bags collected and verified by partner laundromat.' },
+  { key: 'washing', label: 'In The Wash & Treatment', desc: 'Washing, sanitizing, and gentle cycle active.' },
+  { key: 'inspection', label: 'Quality Check & Folding', desc: 'Hand-inspected, steam-pressed, and crisp folding.' },
+  { key: 'out_for_delivery', label: 'Out for Return Delivery', desc: 'Courier en route back to your doorstep.' },
+  { key: 'delivered', label: 'Delivered to Door', desc: 'Clean, fresh laundry delivered to doorstep.' }
+];
+
+function newOrderId() {
+  let id;
+  do { id = 'MM-' + crypto.randomInt(10_000_000, 100_000_000); } while (db.orders.some((o) => o.id === id));
+  return id;
+}
+function newPin() {
+  let pin;
+  do { pin = String(crypto.randomInt(1000, 10000)); } while (['1234', '0000', '1111', '4321'].includes(pin));
+  return pin;
+}
+function findOwnedOrder(req) {
+  const order = db.orders.find((o) => o.id === req.params.id);
+  if (!order) throw new HttpError(404, 'Order not found');
+  if (!isAdminRequest(req)) {
+    const user = getAuthenticatedUser(req);
+    if (!user) throw new HttpError(401, 'Please sign in to view this order');
+    // 404 (not 403) so order IDs cannot be probed.
+    if (order.userId !== user.id) throw new HttpError(404, 'Order not found');
+  }
+  return order;
+}
+
+app.get('/api/orders', requireUser, (req, res) => {
+  res.json({ orders: db.orders.filter((o) => o.userId === req.user.id) });
 });
 
 app.get('/api/orders/:id', (req, res) => {
-  const user = getAuthenticatedUser(req);
-  if (!user) {
-    return res.status(401).json({ error: 'Please sign in or create an account to track orders' });
-  }
-  const db = loadDB();
-  const order = db.orders.find(o => o.id === req.params.id);
-  if (!order) {
-    return res.status(404).json({ error: 'Order not found' });
-  }
-  if (user.role !== 'admin' && order.userId && order.userId !== user.id) {
-    return res.status(403).json({ error: 'Access denied to this order' });
-  }
-  res.json({ order });
+  res.json({ order: findOwnedOrder(req) });
 });
 
-app.post('/api/orders', (req, res) => {
-  const user = getAuthenticatedUser(req);
-  if (!user) {
-    return res.status(401).json({
-      error: 'Authentication required. Please log in or create an account before completing payment and placing your order.'
-    });
+app.post('/api/orders', requireUser, formLimiter, (req, res) => {
+  const b = req.body || {};
+  const user = req.user;
+  const pickupAddress = str(b.pickupAddress || b.address, { field: 'Pickup address', max: 300, required: true });
+  const serviceKey = resolveServiceKey(b);
+  if (!serviceKey) throw new HttpError(400, 'Please choose a valid service.');
+
+  let laundromat = null;
+  if (b.laundromatId || b.laundromatName) {
+    laundromat = db.laundromatPartners.find((l) => l.status === 'Active' && (l.id === b.laundromatId || l.businessName === b.laundromatName));
+    if (!laundromat) throw new HttpError(400, 'Please select a valid partner laundromat.');
   }
 
-  const {
-    customerName,
-    phone,
-    pickupAddress,
-    serviceType,
-    laundromatId,
-    laundromatName,
-    basketSize,
-    bagCount,
-    estimatedWeight,
-    detergent,
-    specialInstructions,
-    pickupTime,
-    items,
-    total,
-    paymentMethod,
-    discount
-  } = req.body;
-
-  const targetAddress = pickupAddress || req.body.address;
-  const targetService = serviceType || req.body.service;
-
-  if (!targetAddress || !targetService) {
-    return res.status(400).json({ error: 'Pickup Address and Service Type are required.' });
-  }
-
-  if (!laundromatId && !laundromatName) {
-    return res.status(400).json({ error: 'Please select a partner laundromat to process your pickup or delivery.' });
-  }
-
-  const db = loadDB();
-  const orderId = 'MM-' + Math.floor(1000 + Math.random() * 9000);
-
-  // Look up laundromat details
-  let selectedLaundromat = null;
-  if (Array.isArray(db.laundromatPartners)) {
-    selectedLaundromat = db.laundromatPartners.find(l => l.id === laundromatId || l.businessName === laundromatName);
-  }
-  const verifiedLaundromatName = selectedLaundromat ? selectedLaundromat.businessName : (laundromatName || 'Selected Laundromat Partner');
-  const verifiedLaundromatAddress = selectedLaundromat ? selectedLaundromat.address : '';
-
-  const calculatedItems = items && items.length > 0 ? items : [
-    { name: serviceType, price: parseFloat(total) || 360.00 }
-  ];
-  const calculatedTotal = parseFloat(total) || 360.00;
-  // 15% South African Value-Added Tax (VAT)
-  const calculatedSubtotal = +(calculatedTotal / 1.15).toFixed(2);
-  const calculatedTax = +(calculatedTotal - calculatedSubtotal).toFixed(2);
-
-  // Secure 4-digit handover delivery PIN (excludes easily guessed PINs)
-  let deliveryPin = '';
-  while (true) {
-    const pinNum = Math.floor(1000 + Math.random() * 9000);
-    deliveryPin = pinNum.toString();
-    if (deliveryPin !== '1234' && deliveryPin !== '0000') break;
-  }
+  const q = quote({ serviceKey, quantity: b.weight ?? b.quantity, sizeValue: b.sizeValue, promoCode: b.promoCode });
+  const orderId = newOrderId();
+  const paymentMethod = oneOf(b.paymentMethod, ['instant_eft', 'credit_card', 'doorstep_pos', 'Instant EFT / Capitec Pay', 'Card', 'Cash'], 'instant_eft');
 
   const newOrder = {
     id: orderId,
     userId: user.id,
-    customerName: customerName || user.name || 'Customer',
-    phone: phone || user.phone || '',
-    pickupAddress: pickupAddress,
-    serviceType: serviceType,
-    laundromatId: laundromatId || (selectedLaundromat ? selectedLaundromat.id : null),
-    laundromatName: verifiedLaundromatName,
-    laundromatAddress: verifiedLaundromatAddress,
-    basketSize: basketSize || 'Medium Basket',
-    bagCount: bagCount || 1,
-    estimatedWeight: estimatedWeight || 'Basket size / item count',
-    pricingModel: 'Laundromat Tariff · Basket Size & Individual Item Rates',
-    detergent: detergent || 'Hypoallergenic (Eco)',
-    specialInstructions: specialInstructions || 'Standard handling',
-    deliveryPin: deliveryPin,
-    protectionPlan: req.body.protectionPlan || false,
+    customerName: str(b.customerName, { field: 'Name', max: 100 }) || user.name,
+    phone: phone(b.phone) || user.phone || '',
+    pickupAddress,
+    gateCode: str(b.gateCode, { field: 'Gate code', max: 40 }),
+    serviceKey,
+    serviceType: q.serviceName,
+    laundromatId: laundromat ? laundromat.id : null,
+    laundromatName: laundromat ? laundromat.businessName : 'To be assigned',
+    laundromatAddress: laundromat ? laundromat.address : '',
+    quantity: q.quantity,
+    unit: q.unit,
+    estimatedWeight: describeLoad(q),
+    detergent: str(b.detergent, { field: 'Detergent', max: 60 }) || 'Hypoallergenic (Eco)',
+    folding: str(b.folding, { field: 'Folding', max: 60 }),
+    specialInstructions: str(b.specialInstructions || b.instructions, { field: 'Special instructions', max: 500, multiline: true }) || 'Standard handling',
+    pickupTime: str(b.pickupTime || [b.pickupDate, b.timeSlot].filter(Boolean).join(' '), { field: 'Pickup time', max: 80 }) || 'Scheduled pickup window',
+    deliveryPin: newPin(),
     status: 'placed',
     statusStep: 1,
-    totalSteps: 7,
-    pickupTime: pickupTime || 'Scheduled pickup window',
+    totalSteps: ORDER_STEPS.length,
     estimatedDelivery: '24 hours from pickup',
     driver: null,
-    items: calculatedItems,
-    subtotal: calculatedSubtotal,
-    tax: calculatedTax,
-    discount: parseFloat(discount) || 0,
-    total: calculatedTotal,
-    paymentMethod: paymentMethod || 'Instant EFT / Capitec Pay',
-    paymentStatus: 'paid',
+    items: [{ name: `${q.serviceName} (${describeLoad(q)})`, price: q.subtotal }],
+    subtotal: q.beforeVat,
+    tax: q.vat,
+    deliveryFee: q.deliveryFee,
+    discount: q.discount,
+    promoCode: q.promoCode,
+    total: q.total,
+    paymentMethod,
+    // No payment gateway is integrated yet. TODO for owner: integrate
+    // PayFast/Ozow/Yoco/Peach and only mark paid from a verified webhook.
+    paymentStatus: 'unpaid',
     createdAt: new Date().toISOString(),
-    history: [
-      { status: 'Order Confirmed', time: 'Just now', description: `Order ${orderId} placed and confirmed. Payment processed via ${paymentMethod || 'Instant EFT'}. Handover delivery PIN is ${deliveryPin}.` }
-    ]
+    history: [{ status: 'Order Confirmed', time: timeLabel(), description: `Order ${orderId} placed. Priced on the partner laundromat tariff.` }]
   };
 
-  // Update user's default address if not present
-  const userIndex = db.users.findIndex(u => u.id === user.id);
-  if (userIndex !== -1) {
-    if (!db.users[userIndex].address) {
-      db.users[userIndex].address = pickupAddress;
-    }
-    if (!db.users[userIndex].savedAddresses) {
-      db.users[userIndex].savedAddresses = [];
-    }
-    const alreadySaved = db.users[userIndex].savedAddresses.some(a => a.address.toLowerCase() === pickupAddress.toLowerCase());
-    if (!alreadySaved) {
-      db.users[userIndex].savedAddresses.push({
-        label: db.users[userIndex].savedAddresses.length === 0 ? 'Home' : `Address ${db.users[userIndex].savedAddresses.length + 1}`,
-        address: pickupAddress
-      });
-    }
+  if (!user.address) user.address = pickupAddress;
+  if (!Array.isArray(user.savedAddresses)) user.savedAddresses = [];
+  if (user.savedAddresses.length < 20 && !user.savedAddresses.some((a) => String(a.address).toLowerCase() === pickupAddress.toLowerCase())) {
+    user.savedAddresses.push({ id: newId('addr'), label: user.savedAddresses.length === 0 ? 'Home' : `Address ${user.savedAddresses.length + 1}`, address: pickupAddress });
   }
 
   db.orders.unshift(newOrder);
-  saveDB(db);
-
+  saveDB();
   res.status(201).json({ success: true, order: newOrder });
 });
 
-// Real-time server price calculation endpoint
-app.post('/api/pricing/calculate', (req, res) => {
-  const { serviceType = 'wash_fold', sizeValue = 'medium', promoCode = '' } = req.body;
-  let subtotal = 360.00;
-  let weightText = 'Up to 10kg (~22 lbs)';
-  let bagCount = 2;
-
-  if (serviceType === 'wash_fold') {
-    if (sizeValue === 'small') { subtotal = 185.00; weightText = 'Up to 5kg (~11 lbs)'; bagCount = 1; }
-    else if (sizeValue === 'medium') { subtotal = 360.00; weightText = 'Up to 10kg (~22 lbs)'; bagCount = 2; }
-    else { subtotal = 680.00; weightText = 'Up to 20kg (~44 lbs)'; bagCount = 3; }
-  } else if (serviceType === 'dry_clean') {
-    const items = sizeValue === 'small' ? 4 : (sizeValue === 'medium' ? 8 : 16);
-    subtotal = items * 85.00;
-    weightText = `${items} tailored garments`;
-    bagCount = sizeValue === 'small' ? 1 : 2;
-  } else if (serviceType === 'iron_press') {
-    if (sizeValue === 'small') { subtotal = 240.00; weightText = 'Up to 5kg (~11 lbs) iron pressed'; bagCount = 1; }
-    else if (sizeValue === 'medium') { subtotal = 460.00; weightText = 'Up to 10kg (~22 lbs) iron pressed'; bagCount = 2; }
-    else { subtotal = 880.00; weightText = 'Up to 20kg (~44 lbs) iron pressed'; bagCount = 3; }
-  } else if (serviceType === 'bedding') {
-    if (sizeValue === 'small') { subtotal = 165.00; weightText = '1 duvet & bedding bundle (Single/3-Quarter)'; bagCount = 1; }
-    else if (sizeValue === 'medium') { subtotal = 320.00; weightText = '2 duvet & linen bundles (Double/Queen)'; bagCount = 2; }
-    else { subtotal = 475.00; weightText = '3 duvet & sheet bundles (King/Feather)'; bagCount = 3; }
-  }
-
-  const deliveryFee = subtotal >= 350 ? 0.00 : 45.00;
-  
-  let discount = 0;
-  const upperCode = (promoCode || '').trim().toUpperCase();
-  if (upperCode === 'FIRSTWASH' || upperCode === 'WELCOME50' || upperCode === 'MM50') {
-    discount = 50.00;
-  }
-
-  const total = Math.max(0, subtotal + deliveryFee - discount);
-  const vat = +(total - (total / 1.15)).toFixed(2);
-  const beforeVat = +(total / 1.15).toFixed(2);
-
-  res.json({
-    subtotal,
-    deliveryFee,
-    discount,
-    vat,
-    beforeVat,
-    total,
-    weightText,
-    bagCount,
-    currency: 'ZAR',
-    symbol: 'R'
-  });
-});
-
-// Advance order status for live tracking simulation
-app.post('/api/orders/:id/advance', (req, res) => {
-  const db = loadDB();
-  const order = db.orders.find(o => o.id === req.params.id);
-  if (!order) {
-    return res.status(404).json({ error: 'Order not found' });
-  }
-
-  const steps = [
-    { key: 'placed', label: 'Order Confirmed', desc: 'Order placed and logged in system.' },
-    { key: 'assigned', label: 'Driver Dispatched', desc: 'Local courier dispatched to your address.' },
-    { key: 'picked_up', label: 'Picked Up & Verified', desc: 'Bags collected and verified by partner laundromat.' },
-    { key: 'washing', label: 'In The Wash & Treatment', desc: 'Washing, sanitizing, and gentle cycle active.' },
-    { key: 'inspection', label: 'Quality Check & Folding', desc: 'Hand-inspected, steam-pressed, and crisp folding.' },
-    { key: 'out_for_delivery', label: 'Out for Return Delivery', desc: 'Courier en route back to your doorstep.' },
-    { key: 'delivered', label: 'Delivered to Door', desc: 'Clean, fresh laundry delivered to doorstep.' }
-  ];
-
-  let currentIdx = steps.findIndex(s => s.key === order.status);
-  if (currentIdx < steps.length - 1) {
-    currentIdx++;
-  } else {
-    currentIdx = 0; // loop around for testing
-  }
-
-  const nextStep = steps[currentIdx];
-  order.status = nextStep.key;
-  order.statusStep = currentIdx + 1;
-
-  if (!order.driver && currentIdx >= 1) {
+// Status changes are an operator action: admin only.
+app.post('/api/orders/:id/advance', requireAdmin, (req, res) => {
+  const order = db.orders.find((o) => o.id === req.params.id);
+  if (!order) throw new HttpError(404, 'Order not found');
+  if (order.status === 'cancelled' || order.status === 'delivered') throw new HttpError(409, `Order is already ${order.status}`);
+  const idx = Math.max(0, ORDER_STEPS.findIndex((s) => s.key === order.status)) + 1;
+  const next = ORDER_STEPS[idx];
+  order.status = next.key;
+  order.statusStep = idx + 1;
+  if (req.body && req.body.driver && typeof req.body.driver === 'object') {
     order.driver = {
-      name: 'Thabo Mokoena',
-      phone: '+27 (0)83 712 9043',
-      vehicle: 'VW Polo Vivo (Silver) - CA 482-910',
-      rating: 4.96
+      name: str(req.body.driver.name, { field: 'Driver name', max: 80 }),
+      phone: phone(req.body.driver.phone),
+      vehicle: str(req.body.driver.vehicle, { field: 'Vehicle', max: 80 })
     };
   }
-
-  const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  order.history.push({
-    status: nextStep.label,
-    time: nowTime,
-    description: nextStep.desc
-  });
-
-  saveDB(db);
+  order.history.push({ status: next.label, time: timeLabel(), description: next.desc });
+  saveDB();
   res.json({ success: true, order });
 });
 
-// Cancel order
 app.post('/api/orders/:id/cancel', (req, res) => {
-  const db = loadDB();
-  const order = db.orders.find(o => o.id === req.params.id);
-  if (!order) {
-    return res.status(404).json({ error: 'Order not found' });
+  const order = findOwnedOrder(req);
+  if (['picked_up', 'washing', 'inspection', 'out_for_delivery', 'delivered', 'cancelled'].includes(order.status)) {
+    throw new HttpError(409, 'This order can no longer be cancelled online. Please contact support.');
   }
   order.status = 'cancelled';
-  order.history.push({
-    status: 'Cancelled',
-    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    description: 'Order cancelled by customer.'
-  });
-  saveDB(db);
+  order.history.push({ status: 'Cancelled', time: timeLabel(), description: 'Order cancelled by customer.' });
+  saveDB();
   res.json({ success: true, order });
 });
 
 /* =========================================================================
-   PARTNERS & BUSINESS APPLICATION ROUTES
+   PARTNERS & BUSINESS
    ========================================================================= */
-
-app.post('/api/partners/driver', (req, res) => {
-  const { name, email, phone, city, vehicleType, experience } = req.body;
-  if (!name || !email || !phone) {
-    return res.status(400).json({ error: 'Name, email, and phone are required' });
-  }
-  const db = loadDB();
+app.post('/api/partners/driver', formLimiter, (req, res) => {
+  const b = req.body || {};
   const appItem = {
-    id: 'drv_app_' + Date.now(),
-    name,
-    email,
-    phone,
-    city: city || 'Springfield',
-    vehicleType: vehicleType || 'Standard Car',
-    experience: experience || '1-3 years courier',
+    id: newId('drv_app'),
+    name: str(b.name, { field: 'Name', max: 100, required: true }),
+    email: email(b.email),
+    phone: phone(b.phone, true),
+    city: str(b.city, { field: 'City', max: 100 }),
+    vehicleType: str(b.vehicleType, { field: 'Vehicle type', max: 60 }),
+    experience: str(b.experience, { field: 'Experience', max: 100 }),
+    ...requireConsent(b),
     status: 'Under Review',
     submittedAt: new Date().toISOString()
   };
   db.driverApplications.push(appItem);
-  saveDB(db);
-  res.json({ success: true, message: 'Driver application received! Our onboarding team will contact you within 24 hours.', application: appItem });
+  saveDB();
+  res.status(201).json({ success: true, message: 'Driver application received! Our onboarding team will contact you.' });
 });
 
-// Live Laundromats list endpoint (filtered by city/suburb if specified)
+const PUBLIC_PARTNER_FIELDS = ['id', 'businessName', 'address', 'city', 'suburb', 'rating', 'turnaround', 'specialties', 'pricingPolicy', 'services'];
 app.get('/api/laundromats', (req, res) => {
-  const db = loadDB();
-  const city = (req.query.city || '').toLowerCase().trim();
-  const suburb = (req.query.suburb || '').toLowerCase().trim();
-  let list = Array.isArray(db.laundromatPartners) ? db.laundromatPartners : [];
-
-  if (city || suburb) {
-    const q = city || suburb;
-    list = list.filter(l => 
-      (l.city && l.city.toLowerCase().includes(q)) || 
-      (l.suburb && l.suburb.toLowerCase().includes(q)) ||
-      (l.address && l.address.toLowerCase().includes(q)) ||
-      (l.businessName && l.businessName.toLowerCase().includes(q))
-    );
+  const q = String(req.query.city || req.query.suburb || '').toLowerCase().trim().slice(0, 100);
+  let list = db.laundromatPartners.filter((l) => l.status === 'Active');
+  if (q) {
+    list = list.filter((l) => [l.city, l.suburb, l.address, l.businessName].some((v) => v && v.toLowerCase().includes(q)));
   }
-
-  res.json({
-    success: true,
-    laundromats: list,
-    total: list.length
-  });
+  const laundromats = list.map((l) => Object.fromEntries(PUBLIC_PARTNER_FIELDS.map((k) => [k, l[k]])));
+  res.json({ success: true, laundromats, total: laundromats.length });
 });
 
-app.post('/api/partners/laundromat', (req, res) => {
-  const { businessName, address, contactName, email, phone, machineCount, capacity } = req.body;
-  if (!businessName || !email || !phone) {
-    return res.status(400).json({ error: 'Business name, email, and phone are required' });
-  }
-  const db = loadDB();
+app.post('/api/partners/laundromat', formLimiter, (req, res) => {
+  const b = req.body || {};
   const appItem = {
-    id: 'lnd_app_' + Date.now(),
-    businessName,
-    address,
-    contactName,
-    email,
-    phone,
-    machineCount: machineCount || '15-30 washers',
-    capacity: capacity || '500+ lbs/day',
+    id: newId('lnd_app'),
+    businessName: str(b.businessName, { field: 'Business name', max: 120, required: true }),
+    address: str(b.address, { field: 'Address', max: 300 }),
+    contactName: str(b.contactName, { field: 'Contact name', max: 100 }),
+    email: email(b.email),
+    phone: phone(b.phone, true),
+    machineCount: str(b.machineCount, { field: 'Machine count', max: 40 }),
+    capacity: str(b.capacity, { field: 'Capacity', max: 40 }),
+    ...requireConsent(b),
     status: 'In Review',
     submittedAt: new Date().toISOString()
   };
-  db.laundromatPartners.push(appItem);
-  saveDB(db);
-  res.json({ success: true, message: 'Laundromat partnership request received! A local operations director will schedule an on-site visit.', application: appItem });
+  // Applications are stored separately and never shown publicly until an admin
+  // vets them and adds them to laundromatPartners.
+  db.laundromatApplications.push(appItem);
+  saveDB();
+  res.status(201).json({ success: true, message: 'Laundromat partnership request received! Our operations team will be in touch.' });
 });
 
-app.post('/api/business/inquiry', (req, res) => {
-  const { companyName, contactName, email, phone, industry, estimatedVolume, notes } = req.body;
-  if (!companyName || !email) {
-    return res.status(400).json({ error: 'Company name and email are required' });
-  }
-  const db = loadDB();
+app.post('/api/business/inquiry', formLimiter, (req, res) => {
+  const b = req.body || {};
   const inquiry = {
-    id: 'biz_' + Date.now(),
-    companyName,
-    contactName,
-    email,
-    phone,
-    industry: industry || 'Hospitality / Fitness / Corporate',
-    estimatedVolume: estimatedVolume || '50-200 lbs/week',
-    notes,
-    status: 'Quote Prepared',
+    id: newId('biz'),
+    companyName: str(b.companyName, { field: 'Company name', max: 120, required: true }),
+    contactName: str(b.contactName, { field: 'Contact name', max: 100 }),
+    email: email(b.email),
+    phone: phone(b.phone),
+    industry: str(b.industry, { field: 'Industry', max: 80 }),
+    location: str(b.location, { field: 'Location', max: 120 }),
+    estimatedVolume: str(b.estimatedVolume, { field: 'Estimated volume', max: 60 }),
+    notes: str(b.notes, { field: 'Notes', max: 2000, multiline: true }),
+    ...requireConsent(b),
+    status: 'New',
     submittedAt: new Date().toISOString()
   };
   db.businessInquiries.push(inquiry);
-  saveDB(db);
-  res.json({ success: true, message: 'Commercial account inquiry received! Your dedicated account manager will provide custom bulk rates today.', inquiry });
+  saveDB();
+  res.status(201).json({ success: true, message: 'Commercial account inquiry received! Our team will be in touch with custom rates.' });
 });
 
 /* =========================================================================
-   REAL-TIME DATABASE-DRIVEN LOCATIONS & FACTUAL OPERATIONAL STATS
+   LOCATIONS & STATS (no other customers' data is ever exposed)
    ========================================================================= */
-
-// Real-time algorithm extracting genuine locations from existing database records
 app.get('/api/locations/popular', (req, res) => {
   const user = getAuthenticatedUser(req);
-  const db = loadDB();
-
-  const frequencyMap = {};
-
-  // 1. Extract and aggregate pickup locations from real database orders
-  if (Array.isArray(db.orders)) {
-    db.orders.forEach(order => {
-      if (order.pickupAddress && order.pickupAddress.trim()) {
-        const fullAddr = order.pickupAddress.trim();
-        frequencyMap[fullAddr] = (frequencyMap[fullAddr] || 0) + 1;
-
-        // Also index by suburb / area if comma separated
-        const parts = fullAddr.split(',').map(p => p.trim()).filter(Boolean);
-        if (parts.length > 1) {
-          const area = parts.slice(1).join(', ');
-          frequencyMap[area] = (frequencyMap[area] || 0) + 1;
-        }
-      }
-    });
+  const counts = {};
+  for (const p of db.laundromatPartners.filter((l) => l.status === 'Active')) {
+    if (p.city) counts[p.city] = (counts[p.city] || 0) + 1;
+    if (p.suburb) counts[p.suburb] = (counts[p.suburb] || 0) + 1;
   }
-
-  // 2. Extract locations from real registered users and their saved addresses
-  if (Array.isArray(db.users)) {
-    db.users.forEach(u => {
-      if (u.address && u.address.trim()) {
-        const fullAddr = u.address.trim();
-        frequencyMap[fullAddr] = (frequencyMap[fullAddr] || 0) + 1;
-      }
-      if (Array.isArray(u.savedAddresses)) {
-        u.savedAddresses.forEach(sa => {
-          if (sa.address && sa.address.trim()) {
-            frequencyMap[sa.address.trim()] = (frequencyMap[sa.address.trim()] || 0) + 1;
-          }
-        });
-      }
-    });
-  }
-
-  // 3. Extract locations from verified laundromat partners
-  if (Array.isArray(db.laundromatPartners)) {
-    db.laundromatPartners.forEach(p => {
-      if (p.address && p.address.trim()) {
-        frequencyMap[p.address.trim()] = (frequencyMap[p.address.trim()] || 0) + 1;
-      }
-      if (p.city && p.city.trim()) {
-        frequencyMap[p.city.trim()] = (frequencyMap[p.city.trim()] || 0) + 1;
-      }
-    });
-  }
-
-  // Sort by actual database order/record frequency descending
-  const sortedLocations = Object.entries(frequencyMap)
+  const popularLocations = Object.entries(counts)
     .sort((a, b) => b[1] - a[1])
-    .map(([location, count]) => ({
-      location,
-      orderCount: count,
-      isUserSaved: false
-    }));
-
-  // If user is authenticated, prioritize their real saved addresses from the database
-  let userAddresses = [];
-  if (user) {
-    if (Array.isArray(user.savedAddresses) && user.savedAddresses.length > 0) {
-      userAddresses = user.savedAddresses.map(sa => ({
-        location: sa.address,
-        label: sa.label || 'Saved Address',
-        orderCount: 1,
-        isUserSaved: true
-      }));
-    } else if (user.address) {
-      userAddresses = [{
-        location: user.address,
-        label: 'Saved Address',
-        orderCount: 1,
-        isUserSaved: true
-      }];
-    }
-  }
-
-  res.json({
-    success: true,
-    userAddresses,
-    popularLocations: sortedLocations,
-    totalRecordsInDb: db.orders.length + db.users.length
-  });
+    .map(([location, partnerCount]) => ({ location, partnerCount, isUserSaved: false }));
+  const userAddresses = user && Array.isArray(user.savedAddresses)
+    ? user.savedAddresses.map((sa) => ({ location: sa.address, label: sa.label || 'Saved Address', isUserSaved: true }))
+    : [];
+  res.json({ success: true, userAddresses, popularLocations });
 });
 
-// Factual operational statistics derived strictly from real database records
 app.get('/api/stats/operational', (req, res) => {
-  const db = loadDB();
-  const totalOrders = Array.isArray(db.orders) ? db.orders.length : 0;
-  const activeOrders = Array.isArray(db.orders) ? db.orders.filter(o => o.status !== 'delivered' && o.status !== 'cancelled').length : 0;
-  const registeredUsers = Array.isArray(db.users) ? db.users.length : 0;
-  const partnerApplications = (db.driverApplications ? db.driverApplications.length : 0) + (db.laundromatPartners ? db.laundromatPartners.length : 0);
+  res.json({ success: true, totalOrders: db.orders.length });
+});
 
+/* =========================================================================
+   ADMIN (requires ADMIN_TOKEN via "X-Admin-Token" or "Authorization: Bearer")
+   ========================================================================= */
+app.get('/api/admin/submissions', requireAdmin, (req, res) => {
   res.json({
-    success: true,
-    totalOrders,
-    activeOrders,
-    registeredUsers,
-    partnerApplications
+    driverApplications: db.driverApplications,
+    laundromatApplications: db.laundromatApplications,
+    businessInquiries: db.businessInquiries,
+    supportTickets: db.supportTickets.slice(-500)
+  });
+});
+app.get('/api/admin/stats', requireAdmin, (req, res) => {
+  res.json({
+    totalOrders: db.orders.length,
+    activeOrders: db.orders.filter((o) => !['delivered', 'cancelled'].includes(o.status)).length,
+    registeredUsers: db.users.length,
+    pendingApplications: db.driverApplications.length + db.laundromatApplications.length
   });
 });
 
 /* =========================================================================
-   SPA FALLBACK
+   FALLBACKS & ERRORS
    ========================================================================= */
+app.use('/api', (req, res) => res.status(404).json({ error: 'Endpoint not found' }));
 
 app.get('*', (req, res) => {
-  // If request is an API endpoint, return clean 404 JSON
-  if (req.path.startsWith('/api/')) {
-    return res.status(404).json({ error: 'Endpoint not found' });
+  if (/\.[a-zA-Z0-9]+$/.test(req.path)) {
+    return res.status(404).type('text/plain').send('Not found');
   }
-  // If request has a file extension (.js, .css, .jpg, .png, .map, etc.), return 404 text instead of index.html
-  if (req.path.match(/\.[a-zA-Z0-9]+$/)) {
-    return res.status(404).type('text/plain').send('Resource not found');
-  }
-  res.sendFile(path.join(__dirname, 'index.html'));
+  const p = req.path.replace(/\/+$/, '') || '/';
+  const known = SPA_ROUTES.has(p) || p.startsWith('/orders/');
+  sendIndex(req, res, known ? 200 : 404);
 });
 
-app.listen(PORT, HOST, () => {
-  console.log(`Server running at http://${HOST}:${PORT}`);
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+  if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Request body too large' });
+  if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Malformed JSON body' });
+  console.error(`[error] ${req.method} ${req.path}:`, err);
+  res.status(500).json({ error: 'Something went wrong. Please try again.' });
 });
+
+/* =========================================================================
+   START & GRACEFUL SHUTDOWN
+   ========================================================================= */
+const server = app.listen(PORT, HOST, () => {
+  console.log(`M&M server listening on http://${HOST}:${PORT} (env: ${IS_PROD ? 'production' : 'development'})`);
+});
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
+server.requestTimeout = 30_000;
+
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received: closing server...`);
+  const force = setTimeout(() => { console.error('Forced shutdown after timeout'); process.exit(1); }, 10_000);
+  force.unref();
+  server.close(async () => {
+    await saveDB();
+    await writeChain;
+    console.log('Shutdown complete.');
+    process.exit(0);
+  });
+  server.closeIdleConnections?.();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('unhandledRejection', (reason) => { console.error('Unhandled rejection:', reason); });
