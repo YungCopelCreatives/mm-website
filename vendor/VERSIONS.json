@@ -1,0 +1,4 @@
+{
+  "firebase": "12.19.0",
+  "@supabase/supabase-js": "2.118.0"
+}

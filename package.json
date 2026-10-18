@@ -1,8 +1,8 @@
 {
   "name": "mm-website",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "M&M Laundromat — book a laundry pickup in seconds, track the wash, get it back at your door.",
+  "description": "M&M Laundry website: book a laundry pickup, pay with Ozow and track the order (shared Firebase/Supabase backend with the app).",
   "type": "module",
   "engines": {
     "node": ">=20.11"
@@ -10,12 +10,16 @@
   "scripts": {
     "dev": "node server.js",
     "start": "NODE_ENV=production node server.js",
-    "lint": "node --check server.js && node --check app.js && node --check sw.js"
+    "build:vendor": "node scripts/build-vendor.mjs",
+    "lint": "node --check server.js && node --check sw.js && for f in js/*.js scripts/*.mjs; do node --check \"$f\" || exit 1; done"
   },
   "dependencies": {
-    "compression": "^1.7.5",
     "express": "^4.21.2",
-    "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0"
+  },
+  "devDependencies": {
+    "@supabase/supabase-js": "2.118.0",
+    "esbuild": "0.25.10",
+    "firebase": "12.19.0"
   }
 }

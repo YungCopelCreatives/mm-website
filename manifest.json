@@ -1,49 +1,92 @@
 {
   "id": "/",
-  "name": "M&M Laundromat — Laundry, wherever you are",
+  "name": "M&M Laundry",
   "short_name": "M&M Laundry",
-  "description": "Book an on-demand laundry pickup in 60 seconds with live wash tracking, eco-friendly detergents, and transparent rates delivered right to your door.",
+  "description": "Book a laundry pickup from a verified local laundromat, pay with Ozow and track your order.",
   "lang": "en-ZA",
   "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait-primary",
   "background_color": "#FFFFFF",
-  "theme_color": "#005162",
-  "categories": ["lifestyle", "shopping", "utilities"],
+  "theme_color": "#000000",
+  "categories": [
+    "lifestyle",
+    "shopping",
+    "utilities"
+  ],
   "shortcuts": [
     {
-      "name": "Book a Pickup",
+      "name": "Book a pickup",
       "short_name": "Book",
       "description": "Schedule a doorstep laundry collection",
       "url": "/book",
-      "icons": [{ "src": "/src/assets/images/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [
+        {
+          "src": "/src/assets/images/icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
     },
     {
-      "name": "Track Wash",
-      "short_name": "Track",
-      "description": "Check live status and driver ETA",
+      "name": "Track an order",
+      "short_name": "Orders",
+      "description": "See the status of your orders",
       "url": "/orders",
-      "icons": [{ "src": "/src/assets/images/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [
+        {
+          "src": "/src/assets/images/icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
     },
     {
-      "name": "Services & Rates",
+      "name": "Services and prices",
       "short_name": "Services",
-      "description": "Explore South African laundry and dry cleaning pricing",
+      "description": "Basket and item prices",
       "url": "/services",
-      "icons": [{ "src": "/src/assets/images/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [
+        {
+          "src": "/src/assets/images/icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
     },
     {
-      "name": "Support & Help",
+      "name": "Contact us",
       "short_name": "Support",
-      "description": "Contact dispatch and customer care",
+      "description": "Get help with an order",
       "url": "/contact",
-      "icons": [{ "src": "/src/assets/images/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [
+        {
+          "src": "/src/assets/images/icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
     }
   ],
   "icons": [
-    { "src": "/src/assets/images/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "/src/assets/images/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/src/assets/images/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "/src/assets/images/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/src/assets/images/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/src/assets/images/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ]
 }

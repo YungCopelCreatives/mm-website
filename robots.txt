@@ -1,7 +1,7 @@
-# robots.txt for M&M Laundromat
+# robots.txt for M&M Laundry
 User-agent: *
 Allow: /
-Disallow: /api/
+Disallow: /book
 Disallow: /account
 Disallow: /orders
 Disallow: /login
