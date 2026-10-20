@@ -35,10 +35,10 @@
 
   <link rel="preload" href="/src/assets/fonts/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/src/assets/fonts/inter-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="/styles.css?v=3.0.0">
+  <link rel="stylesheet" href="/styles.css?v=3.1.0">
 
   <script src="/config.js"></script>
-  <script type="module" src="/js/main.js?v=3.0.0"></script>
+  <script type="module" src="/js/main.js?v=3.1.0"></script>
 
   <script type="application/ld+json">
   {
@@ -79,7 +79,7 @@
           {
             "@type": "Question",
             "name": "How is laundry priced?",
-            "acceptedAnswer": { "@type": "Answer", "text": "Everyday laundry is priced by basket size: small, medium, large or family. Sneakers, blankets, carpets and dry cleaning are priced per item. You see the total, including delivery and VAT, before you pay." }
+            "acceptedAnswer": { "@type": "Answer", "text": "Each partner laundromat sets its own prices. Everyday laundry is priced by basket size: small, medium, large or family. Sneakers, blankets, carpets and dry cleaning are priced per item. You see your laundromat's prices and the total, including delivery and VAT, before you pay." }
           },
           {
             "@type": "Question",
@@ -268,7 +268,7 @@
         <div class="wrap">
           <div class="section-head">
             <h2 class="t-h2">Services</h2>
-            <p class="t-secondary">Everyday laundry is priced by basket. Specialist items are priced per item.</p>
+            <p class="t-secondary">Each partner laundromat sets its own prices. Everyday laundry is priced by basket, specialist items per item.</p>
           </div>
           <div class="grid-3">
             <a class="card card-link stack-3" href="/services#wash-fold" data-link>
@@ -279,12 +279,12 @@
             <a class="card card-link stack-3" href="/services#dry-clean" data-link>
               <div class="card-media"><img src="/src/assets/images/dry_clean_garments_1789125413572.jpg" width="1200" height="896" alt="" loading="lazy"></div>
               <h3 class="t-h3">Dry cleaning</h3>
-              <p class="t-small t-secondary">Suits, dresses and delicates. <span data-price="item.dry_clean">R115</span> per item.</p>
+              <p class="t-small t-secondary">Suits, dresses and delicates. From <span data-price="item.dry_clean">R115</span> per item.</p>
             </a>
             <a class="card card-link stack-3" href="/services#blankets" data-link>
               <div class="card-media"><img src="/src/assets/images/laundry_doorstep_delivery_1789125425504.jpg" width="1200" height="896" alt="" loading="lazy"></div>
               <h3 class="t-h3">Sneakers, blankets and carpets</h3>
-              <p class="t-small t-secondary">Specialist cleaning, priced per item. Blankets <span data-price="item.blankets">R130</span>.</p>
+              <p class="t-small t-secondary">Specialist cleaning, priced per item. Blankets from <span data-price="item.blankets">R130</span>.</p>
             </a>
           </div>
         </div>
@@ -333,7 +333,7 @@
         <div class="wrap">
           <ol class="breadcrumb"><li><a href="/" data-link>Home</a></li><li aria-current="page">Services</li></ol>
           <h1 class="t-h1">Services and prices</h1>
-          <p class="t-body-lg t-secondary">Prices include VAT. Delivery is <span data-price="delivery_fee">R45</span>, or free on orders of <span data-price="free_delivery_threshold">R350</span> or more.</p>
+          <p class="t-body-lg t-secondary">Each partner laundromat sets its own prices; below are the lowest prices across our partners. You see your laundromat's exact prices when you book. Prices include VAT. Delivery is <span data-price="delivery_fee">R45</span>, or free on orders of <span data-price="free_delivery_threshold">R350</span> or more.</p>
         </div>
       </div>
       <div class="section">
@@ -342,20 +342,20 @@
             <h2 class="t-h2">Everyday laundry</h2>
             <p class="t-secondary">One price per basket, whatever is in it. A small basket is about one laundry hamper.</p>
             <div class="price-list" aria-label="Basket prices">
-              <div class="price-row"><span>Small basket <span class="t-secondary">· about 1 hamper</span></span><strong data-price="basket.small">R140</strong></div>
-              <div class="price-row"><span>Medium basket <span class="t-secondary">· about 2 hampers</span></span><strong data-price="basket.medium">R220</strong></div>
-              <div class="price-row"><span>Large basket <span class="t-secondary">· about 3 hampers</span></span><strong data-price="basket.large">R310</strong></div>
-              <div class="price-row"><span>Family basket <span class="t-secondary">· about 4 hampers</span></span><strong data-price="basket.family">R430</strong></div>
+              <div class="price-row"><span>Small basket <span class="t-secondary">· about 1 hamper</span></span><strong><span class="t-secondary">from</span> <span data-price="basket.small">R140</span></strong></div>
+              <div class="price-row"><span>Medium basket <span class="t-secondary">· about 2 hampers</span></span><strong><span class="t-secondary">from</span> <span data-price="basket.medium">R220</span></strong></div>
+              <div class="price-row"><span>Large basket <span class="t-secondary">· about 3 hampers</span></span><strong><span class="t-secondary">from</span> <span data-price="basket.large">R310</span></strong></div>
+              <div class="price-row"><span>Family basket <span class="t-secondary">· about 4 hampers</span></span><strong><span class="t-secondary">from</span> <span data-price="basket.family">R430</span></strong></div>
             </div>
           </div>
           <div class="stack-4">
             <h2 class="t-h2">Per item</h2>
             <p class="t-secondary">Specialist cleaning for things that do not belong in a basket.</p>
             <div class="price-list" aria-label="Item prices">
-              <div class="price-row"><span>Sneakers <span class="t-secondary">· per pair</span></span><strong data-price="item.sneakers">R125</strong></div>
-              <div class="price-row"><span>Blankets and duvets <span class="t-secondary">· per item</span></span><strong data-price="item.blankets">R130</strong></div>
-              <div class="price-row"><span>Carpets and rugs <span class="t-secondary">· per item</span></span><strong data-price="item.carpets">R180</strong></div>
-              <div class="price-row"><span>Dry cleaning <span class="t-secondary">· per garment</span></span><strong data-price="item.dry_clean">R115</strong></div>
+              <div class="price-row"><span>Sneakers <span class="t-secondary">· per pair</span></span><strong><span class="t-secondary">from</span> <span data-price="item.sneakers">R125</span></strong></div>
+              <div class="price-row"><span>Blankets and duvets <span class="t-secondary">· per item</span></span><strong><span class="t-secondary">from</span> <span data-price="item.blankets">R130</span></strong></div>
+              <div class="price-row"><span>Carpets and rugs <span class="t-secondary">· per item</span></span><strong><span class="t-secondary">from</span> <span data-price="item.carpets">R180</span></strong></div>
+              <div class="price-row"><span>Dry cleaning <span class="t-secondary">· per garment</span></span><strong><span class="t-secondary">from</span> <span data-price="item.dry_clean">R115</span></strong></div>
             </div>
           </div>
         </div>
@@ -377,25 +377,25 @@
           <article class="card stack-3" id="sneakers">
             <h3 class="t-h3">Sneakers</h3>
             <p class="t-small t-secondary">Hand cleaned uppers and soles, deodorised and air dried.</p>
-            <ul class="list-check"><li><span data-price="item.sneakers">R125</span> per pair</li><li>Canvas, mesh and leather</li><li>Usually back within 48 hours</li></ul>
+            <ul class="list-check"><li>From <span data-price="item.sneakers">R125</span> per pair</li><li>Canvas, mesh and leather</li><li>Usually back within 48 hours</li></ul>
             <a class="btn btn-primary btn-sm mt-4" href="/book?service=sneakers" data-link>Book sneakers</a>
           </article>
           <article class="card stack-3" id="blankets">
             <h3 class="t-h3">Blankets and duvets</h3>
             <p class="t-small t-secondary">Washed in large-capacity machines and dried right through.</p>
-            <ul class="list-check"><li><span data-price="item.blankets">R130</span> per item</li><li>Down and synthetic fillings</li><li>Usually back within 48 hours</li></ul>
+            <ul class="list-check"><li>From <span data-price="item.blankets">R130</span> per item</li><li>Down and synthetic fillings</li><li>Usually back within 48 hours</li></ul>
             <a class="btn btn-primary btn-sm mt-4" href="/book?service=blankets" data-link>Book blankets</a>
           </article>
           <article class="card stack-3" id="carpets">
             <h3 class="t-h3">Carpets and rugs</h3>
             <p class="t-small t-secondary">Loose rugs and hallway runners shampooed and dried.</p>
-            <ul class="list-check"><li><span data-price="item.carpets">R180</span> per item</li><li>Loose rugs only, not fitted carpets</li><li>Usually back within 72 hours</li></ul>
+            <ul class="list-check"><li>From <span data-price="item.carpets">R180</span> per item</li><li>Loose rugs only, not fitted carpets</li><li>Usually back within 72 hours</li></ul>
             <a class="btn btn-primary btn-sm mt-4" href="/book?service=carpets" data-link>Book carpets</a>
           </article>
           <article class="card stack-3" id="dry-clean">
             <h3 class="t-h3">Dry cleaning</h3>
             <p class="t-small t-secondary">Suits, coats, silk and wool cleaned with solvent-based care and pressed.</p>
-            <ul class="list-check"><li><span data-price="item.dry_clean">R115</span> per garment</li><li>Returned on hangers</li><li>Usually back within 48 hours</li></ul>
+            <ul class="list-check"><li>From <span data-price="item.dry_clean">R115</span> per garment</li><li>Returned on hangers</li><li>Usually back within 48 hours</li></ul>
             <a class="btn btn-primary btn-sm mt-4" href="/book?service=dry_clean" data-link>Book dry cleaning</a>
           </article>
         </div>
@@ -469,7 +469,7 @@
       <div class="section">
         <div class="wrap wrap-narrow">
           <div class="faq">
-            <details><summary>How is laundry priced?</summary><div class="answer">Everyday laundry is priced by basket size: small, medium, large or family. Sneakers, blankets, carpets and dry cleaning are priced per item. Delivery is <span data-price="delivery_fee">R45</span> and free on orders of <span data-price="free_delivery_threshold">R350</span> or more. You see the total, including VAT, before you pay. <a class="text-link" href="/services" data-link>See all prices</a>.</div></details>
+            <details><summary>How is laundry priced?</summary><div class="answer">Each partner laundromat sets its own prices, and you see them when you choose a laundromat. Everyday laundry is priced by basket size: small, medium, large or family. Sneakers, blankets, carpets and dry cleaning are priced per item. M&amp;M sets the delivery fee and runs promotions. Delivery is <span data-price="delivery_fee">R45</span> and free on orders of <span data-price="free_delivery_threshold">R350</span> or more. You see the total, including VAT, before you pay. <a class="text-link" href="/services" data-link>See all prices</a>.</div></details>
             <details><summary>Why do I choose a laundromat?</summary><div class="answer">Each partner laundromat is an independent local business. Choosing one near you keeps pickup and delivery quick. <a class="text-link" href="/partners" data-link>See our partners</a>.</div></details>
             <details><summary>How do I pay?</summary><div class="answer">You pay when you book, with Ozow instant EFT from your banking app. Your order is confirmed as soon as the payment clears. If you do not finish paying, the booking is cancelled after an hour and nothing is charged.</div></details>
             <details><summary>What is the handover PIN?</summary><div class="answer">Every order has a 4-digit PIN shown on your order page once you are signed in. Give it to the driver when your clean laundry is returned. Never share it before then.</div></details>
@@ -861,7 +861,7 @@
           <h2>Pockets and existing damage</h2>
           <p>Please empty all pockets. We are not responsible for cash, keys, documents, jewellery or electronics left in clothing, or for damage caused by items left in pockets.</p>
           <h2>Prices and VAT</h2>
-          <p>Prices are per basket (small, medium, large, family) or per item (sneakers, blankets, carpets, dry cleaning), in South African Rand, including 15% VAT. The full price is shown before you pay.</p>
+          <p>Prices are set by the partner laundromat you choose, per basket (small, medium, large, family) or per item (sneakers, blankets, carpets, dry cleaning), in South African Rand, including 15% VAT. M&amp;M adds the delivery fee and applies any M&amp;M promotion. The full price is shown before you pay.</p>
           <h2>Disputes</h2>
           <p>These terms are governed by South African law. Disputes that cannot be settled between us may be referred to the Consumer Goods and Services Ombud.</p>
         </div>

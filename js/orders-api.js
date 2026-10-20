@@ -1,7 +1,9 @@
 // ONE place for the order/pricing contract with the shared Supabase backend.
 // If the edge-function field names change, only this file needs to follow.
 //
-//   GET  {SUPABASE_URL}/functions/v1/get-pricing        (public)
+//   GET  {SUPABASE_URL}/functions/v1/get-pricing                    (public) "from" prices across laundromats
+//   GET  {SUPABASE_URL}/functions/v1/get-pricing?laundromat_id=<id> (public) that laundromat's own prices
+//        Base prices belong to each laundromat; M&M sets only the delivery fee, VAT and promo codes.
 //   POST {SUPABASE_URL}/functions/v1/create-order       (Bearer Firebase ID token + X-Firebase-AppCheck)
 //
 // Orders are read back through Supabase under RLS (customers can read their own rows).
@@ -35,7 +37,7 @@ export const TIME_SLOTS = [
   { id: 'evening_2', label: '06:00 PM - 08:00 PM', start: '18:00' },
 ];
 
-/** Shown until get-pricing answers (and if it cannot be reached). Server prices always win at checkout. */
+/** "From" prices shown until get-pricing answers (and if it cannot be reached). Server prices always win at checkout. */
 export const DEFAULT_PRICING = Object.freeze({
   currency: 'ZAR',
   basket_pricing: { small: 140, medium: 220, large: 310, family: 430 },
@@ -51,16 +53,30 @@ export const DEFAULT_PRICING = Object.freeze({
 
 const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
-export function normalizePricing(r) {
-  if (!r || typeof r !== 'object') return DEFAULT_PRICING;
+/**
+ * Normalises a get-pricing response. For one laundromat (`laundromatId` set) a missing price
+ * means "not offered"; for the "from" prices a missing value falls back to the defaults.
+ */
+export function normalizePricing(r, laundromatId = null) {
+  if (!r || typeof r !== 'object') return laundromatId ? { ...DEFAULT_PRICING, laundromat_id: laundromatId, unavailable: true } : DEFAULT_PRICING;
   const d = DEFAULT_PRICING;
-  const basket = {}; const item = {};
-  for (const k of Object.keys(d.basket_pricing)) basket[k] = num(r.basket_pricing?.[k], d.basket_pricing[k]);
-  for (const k of Object.keys(d.item_pricing)) item[k] = num(r.item_pricing?.[k], d.item_pricing[k]);
+  const pick = (src, dflt) => {
+    const out = {};
+    for (const k of Object.keys(dflt)) {
+      const v = Number(src?.[k]);
+      if (Number.isFinite(v) && v > 0) out[k] = v;
+      else if (!laundromatId) out[k] = dflt[k];
+    }
+    return out;
+  };
+  const from = {};
+  for (const [k, v] of Object.entries(r.laundromat_from || {})) if (Number.isFinite(Number(v)) && Number(v) > 0) from[k] = Number(v);
   return {
     currency: r.currency || 'ZAR',
-    basket_pricing: basket,
-    item_pricing: item,
+    laundromat_id: laundromatId,
+    basket_pricing: pick(r.basket_pricing, d.basket_pricing),
+    item_pricing: pick(r.item_pricing, d.item_pricing),
+    laundromat_from: from,
     delivery_fee: num(r.delivery_fee, d.delivery_fee),
     free_delivery_threshold: num(r.free_delivery_threshold, d.free_delivery_threshold),
     service_fee: num(r.service_fee, d.service_fee),
@@ -71,14 +87,40 @@ export function normalizePricing(r) {
   };
 }
 
-let pricingPromise = null;
-export function fetchPricing() {
-  if (!pricingPromise) {
-    pricingPromise = callFunction('get-pricing', { method: 'GET' })
-      .then(normalizePricing)
-      .catch((err) => { console.warn('get-pricing unavailable, showing default tariffs:', err.message); pricingPromise = null; return DEFAULT_PRICING; });
+const pricingCache = new Map();
+/**
+ * fetchPricing()            "from" prices (lowest across partner laundromats) for marketing pages
+ * fetchPricing(laundromatId) that laundromat's prices; `unavailable: true` if it has none published
+ */
+export function fetchPricing(laundromatId = null) {
+  const key = laundromatId || '';
+  if (!pricingCache.has(key)) {
+    const path = laundromatId ? `get-pricing?laundromat_id=${encodeURIComponent(laundromatId)}` : 'get-pricing';
+    const p = callFunction(path, { method: 'GET' })
+      .then((r) => normalizePricing(r, laundromatId))
+      .catch((err) => {
+        pricingCache.delete(key);
+        if (laundromatId && err.status === 404) return { ...normalizePricing({}, laundromatId), unpublished: true };
+        console.warn('get-pricing unavailable, showing default prices:', err.message);
+        return laundromatId ? normalizePricing(null, laundromatId) : DEFAULT_PRICING;
+      });
+    pricingCache.set(key, p);
   }
-  return pricingPromise;
+  return pricingCache.get(key);
+}
+
+/** True when the laundromat behind `pricing` offers this service (and basket size). */
+export function offers(pricing, service, basketSize) {
+  const svc = SERVICES[service];
+  if (!svc) return false;
+  if (svc.kind === 'basket') return basketSize ? num(pricing.basket_pricing[basketSize], 0) > 0 : Object.keys(pricing.basket_pricing).length > 0;
+  return num(pricing.item_pricing[service], 0) > 0;
+}
+
+/** Lowest basket price for a service tile ("from R…"), or null when no basket is offered. */
+export function fromBasketPrice(pricing) {
+  const v = Object.values(pricing.basket_pricing).map(Number).filter((n) => n > 0);
+  return v.length ? Math.min(...v) : null;
 }
 
 export function unitPrice(pricing, draft) {
@@ -90,7 +132,7 @@ export function unitPrice(pricing, draft) {
 /** Client-side estimate for display only; create-order recomputes everything on the server. */
 export function estimate(pricing, draft) {
   const svc = SERVICES[draft.service];
-  if (!svc) return null;
+  if (!svc || !offers(pricing, draft.service, svc.kind === 'basket' ? draft.basket_size : null)) return null;
   const qty = svc.kind === 'basket' ? 1 : Math.max(1, Math.min(MAX_ITEMS, Math.trunc(num(draft.item_count, 1))));
   const price = unitPrice(pricing, draft);
   const subtotal = price * qty;

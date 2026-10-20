@@ -7,7 +7,7 @@ server. The website uses **the same accounts, database and APIs as the M&M mobil
 | --- | --- |
 | Sign up / log in / Google sign-in / password reset / email verification | Firebase Auth (browser SDK) |
 | Profile, saved addresses, orders, tracking, handover PIN, driver card, partner list | Supabase Postgres under RLS, with the Firebase ID token as a third-party JWT |
-| Prices | `GET {SUPABASE_URL}/functions/v1/get-pricing` |
+| Prices | `GET {SUPABASE_URL}/functions/v1/get-pricing?laundromat_id=<id>` (that laundromat's own prices; booking) and `GET …/get-pricing` ("from" prices across laundromats; marketing pages). Base prices are set by each laundromat; M&M sets delivery fee, VAT and promo codes. |
 | Creating an order and paying | `POST {SUPABASE_URL}/functions/v1/create-order` (`payment_method: 'ozow'`) then redirect to Ozow |
 | Contact, business, driver and laundromat-partner forms | `POST {SUPABASE_URL}/functions/v1/submit-form` (draft in `supabase-functions-to-add/`) |
 | Bot / abuse protection | Firebase App Check (reCAPTCHA Enterprise), sent as `X-Firebase-AppCheck` |

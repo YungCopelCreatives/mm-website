@@ -1,14 +1,16 @@
-// Booking wizard: laundry -> pickup -> review & pay (Ozow).
+// Booking wizard: laundromat & laundry -> pickup -> review & pay (Ozow).
+// Each laundromat sets its own prices: the customer picks a laundromat first and then sees that
+// laundromat's prices (get-pricing?laundromat_id=…); create-order charges exactly those.
 import { $, $$, html, raw, render, money, toast, busy, uuid, store, validate } from './ui.js';
 import {
-  SERVICES, BASKET_SIZES, TIME_SLOTS, MAX_ITEMS, fetchPricing, DEFAULT_PRICING, estimate, quoteOrder, createOrder,
+  SERVICES, BASKET_SIZES, TIME_SLOTS, MAX_ITEMS, fetchPricing, DEFAULT_PRICING, estimate, quoteOrder, createOrder, offers, fromBasketPrice,
   returnUrlFor, isSafePaymentUrl, listLaundromats, listAddresses, addAddress,
 } from './orders-api.js';
 import { isConfigured, resendVerification, refreshVerification } from './backend.js';
 import { attachAutocomplete } from './maps.js';
 
 const KEY = 'mm.booking.v1';
-const STEPS = ['Your laundry', 'Pickup', 'Review and pay'];
+const STEPS = ['Laundromat and laundry', 'Pickup', 'Review and pay'];
 const DETERGENTS = [
   { id: '', label: 'Standard detergent' },
   { id: 'hypoallergenic', label: 'Hypoallergenic, fragrance-free' },
@@ -16,7 +18,8 @@ const DETERGENTS = [
 
 let ctx = null;          // { navigate, getSession }
 let draft = null;
-let pricing = DEFAULT_PRICING;
+let pricing = DEFAULT_PRICING; // the chosen laundromat's prices ("from" prices until one is chosen)
+let pricingFor = '';           // laundromat id `pricing` belongs to ('' = "from" prices)
 let laundromats = null;  // null = loading
 let addresses = [];
 let quote = null;
@@ -58,8 +61,9 @@ function progress() {
 }
 
 function summary() {
-  const est = quote && quoteKey === keyFor() ? quote : estimate(pricing, draft);
-  if (!est) return html``;
+  const priced = draft.laundromat_id && pricingFor === draft.laundromat_id;
+  const est = quote && quoteKey === keyFor() ? quote : priced ? estimate(pricing, draft) : null;
+  if (!est) return html`<div class="card stack-2" aria-live="polite"><h2 class="t-h4">Summary</h2><p class="t-small t-secondary">${draft.laundromat_id ? (priced ? 'Choose something this laundromat offers to see the price.' : 'Loading prices…') : 'Choose a laundromat to see its prices.'}</p></div>`;
   const l = laundromats?.find((x) => x.id === draft.laundromat_id);
   return html`
     <div class="card stack-4" aria-live="polite">
@@ -77,29 +81,57 @@ function summary() {
     </div>`;
 }
 
+function laundromatField() {
+  return html`
+    <div class="field" style="max-width:560px">
+      <label class="label" for="bkLaundromat">Laundromat</label>
+      ${laundromats === null ? html`<div class="skeleton" style="height:48px"></div>` : laundromats.length ? html`
+        <select class="select" id="bkLaundromat" name="laundromat_id" required>
+          <option value="">Choose a laundromat</option>
+          ${laundromats.map((l) => html`<option value="${l.id}" ${raw(draft.laundromat_id === l.id ? 'selected' : '')}>${l.name}${l.address ? ` — ${l.address}` : ''}</option>`)}
+        </select>
+        <span class="hint">Each laundromat sets its own prices. See all <a class="text-link" href="/partners" data-link>partner laundromats</a>.</span>` : html`
+        <div class="notice notice-warning">No partner laundromats are available right now. Please try again later.</div>`}
+    </div>`;
+}
+
 function stepLaundry() {
   const svc = SERVICES[draft.service];
+  const chosen = Boolean(draft.laundromat_id);
+  const ready = chosen && pricingFor === draft.laundromat_id;
+  const l = laundromats?.find((x) => x.id === draft.laundromat_id);
+  const tilePrice = (id, s) => {
+    if (!ready) return '';
+    if (!offers(pricing, id)) return 'Not offered';
+    return s.kind === 'basket' ? `from ${money(fromBasketPrice(pricing))}` : money(pricing.item_pricing[id]);
+  };
   return html`
-    <fieldset class="fieldset">
+    ${laundromatField()}
+    ${chosen && ready && pricing.unpublished ? html`<div class="notice notice-warning mt-6">${l?.name || 'This laundromat'} has not published its prices yet. Please choose another laundromat.</div>` : ''}
+    ${chosen && ready && pricing.unavailable ? html`<div class="notice notice-warning mt-6">We could not load this laundromat's prices. Check your connection and try again.</div>` : ''}
+    <fieldset class="fieldset mt-8" ${raw(chosen ? '' : 'disabled')}>
       <legend class="t-h3">What needs washing?</legend>
+      ${chosen ? '' : html`<p class="t-small t-secondary">Choose a laundromat first to see its prices.</p>`}
+      ${chosen && !ready ? html`<div class="skeleton" style="height:96px"></div>` : html`
       <div class="tiles tiles-2">
         ${Object.entries(SERVICES).map(([id, s]) => html`
-          <label class="tile"><input type="radio" name="service" value="${id}" ${raw(draft.service === id ? 'checked' : '')}>
+          <label class="tile"><input type="radio" name="service" value="${id}" ${raw(draft.service === id ? 'checked' : '')} ${raw(ready && !offers(pricing, id) ? 'disabled' : '')}>
             <span class="tile-body"><span><span class="tile-title">${s.label}</span><br><span class="tile-meta">${s.kind === 'basket' ? 'Priced by basket' : `Priced per ${s.unit}`}</span></span>
-            <span class="tile-price">${s.kind === 'basket' ? `from ${money(pricing.basket_pricing.small)}` : money(pricing.item_pricing[id])}</span></span>
+            <span class="tile-price">${tilePrice(id, s)}</span></span>
           </label>`)}
-      </div>
+      </div>`}
     </fieldset>
-    ${svc.kind === 'basket' ? html`
+    ${ready && svc.kind === 'basket' && offers(pricing, draft.service) ? html`
       <fieldset class="fieldset mt-8">
         <legend class="t-h3">Basket size</legend>
         <div class="tiles tiles-2">
           ${Object.entries(BASKET_SIZES).map(([id, b]) => html`
-            <label class="tile"><input type="radio" name="basket_size" value="${id}" ${raw(draft.basket_size === id ? 'checked' : '')}>
-              <span class="tile-body"><span><span class="tile-title">${b.label}</span><br><span class="tile-meta">${b.hint}</span></span><span class="tile-price">${money(pricing.basket_pricing[id])}</span></span>
+            <label class="tile"><input type="radio" name="basket_size" value="${id}" ${raw(draft.basket_size === id ? 'checked' : '')} ${raw(offers(pricing, draft.service, id) ? '' : 'disabled')}>
+              <span class="tile-body"><span><span class="tile-title">${b.label}</span><br><span class="tile-meta">${b.hint}</span></span><span class="tile-price">${offers(pricing, draft.service, id) ? money(pricing.basket_pricing[id]) : 'Not offered'}</span></span>
             </label>`)}
         </div>
-      </fieldset>` : html`
+      </fieldset>` : ''}
+    ${ready && svc.kind !== 'basket' && offers(pricing, draft.service) ? html`
       <div class="mt-8 stack-3">
         <h3 class="t-h3" id="qtyLabel">How many ${svc.unit}s?</h3>
         <div class="row">
@@ -110,7 +142,7 @@ function stepLaundry() {
           </div>
           <span class="t-secondary">${money(pricing.item_pricing[draft.service])} per ${svc.unit}</span>
         </div>
-      </div>`}
+      </div>` : ''}
     <div class="field mt-8" style="max-width:420px">
       <label class="label" for="bkDetergent">Detergent</label>
       <select class="select" id="bkDetergent" name="detergent">${DETERGENTS.map((d) => html`<option value="${d.id}" ${raw(draft.detergent === d.id ? 'selected' : '')}>${d.label}</option>`)}</select>
@@ -142,16 +174,6 @@ function stepPickup() {
             <input class="input" id="bkUnit" name="unit" maxlength="120" value="${draft.address.unit}"></div>
         </div>
       </fieldset>
-      <div class="field">
-        <label class="label" for="bkLaundromat">Partner laundromat</label>
-        ${laundromats === null ? html`<div class="skeleton" style="height:48px"></div>` : laundromats.length ? html`
-          <select class="select" id="bkLaundromat" name="laundromat_id" required>
-            <option value="">Choose a laundromat</option>
-            ${laundromats.map((l) => html`<option value="${l.id}" ${raw(draft.laundromat_id === l.id ? 'selected' : '')}>${l.name}${l.address ? ` — ${l.address}` : ''}</option>`)}
-          </select>
-          <span class="hint">See all <a class="text-link" href="/partners" data-link>partner laundromats</a>.</span>` : html`
-          <div class="notice notice-warning">No partner laundromats are available right now. Please try again later.</div>`}
-      </div>
       <div class="form-grid form-grid-2">
         <div class="field"><label class="label" for="bkDate">Pickup day</label>
           <select class="select" id="bkDate" name="pickup_date" required>${dayList.map((d) => html`<option value="${d.id}" ${raw(draft.pickup_date === d.id ? 'selected' : '')}>${d.label}</option>`)}</select></div>
@@ -174,6 +196,7 @@ function stepReview() {
     <div class="stack-6">
       <div class="card stack-3">
         <div class="row-between"><h2 class="t-h4">Your laundry</h2><button type="button" class="btn btn-tertiary btn-sm" data-goto="0">Change</button></div>
+        <p class="t-secondary">${laundromats?.find((x) => x.id === draft.laundromat_id)?.name || 'Laundromat'}</p>
         <p class="t-secondary">${svc.label} · ${svc.kind === 'basket' ? BASKET_SIZES[draft.basket_size].label : `${draft.item_count} ${svc.unit}${draft.item_count === 1 ? '' : 's'}`}${draft.detergent ? ' · Hypoallergenic detergent' : ''}</p>
       </div>
       <div class="card stack-3">
@@ -245,10 +268,50 @@ async function refreshQuote() {
   }
 }
 
+// ---------- prices of the chosen laundromat ----------
+function fixSelection() {
+  // keep the draft on something this laundromat offers
+  if (!offers(pricing, draft.service)) {
+    const first = Object.keys(SERVICES).find((id) => offers(pricing, id));
+    if (first) draft.service = first;
+  }
+  if (SERVICES[draft.service]?.kind === 'basket' && !offers(pricing, draft.service, draft.basket_size)) {
+    const size = Object.keys(BASKET_SIZES).find((id) => offers(pricing, draft.service, id));
+    if (size) draft.basket_size = size;
+  }
+}
+
+function loadLaundromatPricing() {
+  const id = draft.laundromat_id;
+  if (!id) { pricingFor = ''; draw(); return; }
+  if (pricingFor !== id) { pricingFor = ''; draw(); }
+  fetchPricing(id).then((p) => {
+    if (draft.laundromat_id !== id) return; // the customer picked another laundromat meanwhile
+    pricing = p;
+    pricingFor = id;
+    fixSelection();
+    save();
+    draw();
+    if (draft.step === 2) refreshQuote();
+  });
+}
+
+function canContinueLaundry() {
+  if (!draft.laundromat_id) { toast('Choose a laundromat first', 'negative'); return false; }
+  if (pricingFor !== draft.laundromat_id) { toast('Loading this laundromat\'s prices. Try again in a moment.'); return false; }
+  const svc = SERVICES[draft.service];
+  if (!offers(pricing, draft.service, svc?.kind === 'basket' ? draft.basket_size : null)) {
+    toast('This laundromat does not offer that. Choose another service or laundromat.', 'negative');
+    return false;
+  }
+  return true;
+}
+
 // ---------- events ----------
 function readStep(form) {
   const f = new FormData(form);
   if (draft.step === 0) {
+    draft.laundromat_id = f.get('laundromat_id') || draft.laundromat_id || '';
     draft.detergent = f.get('detergent') || '';
   } else if (draft.step === 1) {
     const pick = f.get('address_pick');
@@ -260,7 +323,6 @@ function readStep(form) {
       draft.address_mode = 'new';
       if (draft.address_id && !addresses.some((a) => a.id === draft.address_id)) draft.address_id = null;
     }
-    draft.laundromat_id = f.get('laundromat_id') || '';
     draft.pickup_date = f.get('pickup_date') || draft.pickup_date;
     draft.pickup_slot = f.get('pickup_slot') || draft.pickup_slot;
     draft.notes = String(f.get('notes') || '').trim();
@@ -339,7 +401,7 @@ function bind() {
       save();
       return;
     }
-    if (t.name === 'laundromat_id') { draft.laundromat_id = t.value; save(); redrawSummary(); return; }
+    if (t.name === 'laundromat_id') { draft.laundromat_id = t.value; quote = null; save(); loadLaundromatPricing(); return; }
     if (t.name === 'terms') { draft.terms = t.checked; save(); }
   });
   root.addEventListener('click', async (e) => {
@@ -373,7 +435,7 @@ function bind() {
     if (draft.step < 2) {
       if (!validate(form)) return;
       readStep(form);
-      if (draft.step === 1 && !draft.laundromat_id) return;
+      if (draft.step === 0 && !canContinueLaundry()) return;
       go(draft.step + 1);
     } else {
       readStep(form);
@@ -392,13 +454,16 @@ export async function showBooking({ query, session }, context) {
   if (qs && SERVICES[qs]) { draft = { ...draft, service: qs, step: 0 }; history.replaceState({}, '', '/book'); }
   const size = query.get('size');
   if (size && BASKET_SIZES[size]) draft.basket_size = size;
-  if (draft.step === 2 && !draft.laundromat_id) draft.step = 1;
+  if (draft.step > 0 && !draft.laundromat_id) draft.step = 0;
   save();
   draw();
 
-  fetchPricing().then((p) => { pricing = p; draw(); });
+  loadLaundromatPricing();
   if (laundromats === null) {
-    listLaundromats().then((l) => { laundromats = l; }).catch((err) => { console.warn('laundromats', err?.message); laundromats = []; }).finally(() => { if (draft.step === 1 || draft.step === 2) draw(); else redrawSummary(); });
+    listLaundromats().then((l) => { laundromats = l; }).catch((err) => { console.warn('laundromats', err?.message); laundromats = []; }).finally(() => {
+      if (draft.laundromat_id && laundromats.length && !laundromats.some((x) => x.id === draft.laundromat_id)) { draft.laundromat_id = ''; draft.step = 0; save(); }
+      draw();
+    });
   }
   if (session.user) {
     listAddresses(session.user.uid).then((a) => {

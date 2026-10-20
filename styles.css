@@ -263,6 +263,11 @@ body.no-scroll { overflow: hidden; }
 .tile-title { font-weight: var(--w-medium); }
 .tile-meta { font-size: 14px; line-height: 20px; color: var(--text-secondary); }
 .tile-price { font-weight: var(--w-medium); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* a service or size the chosen laundromat does not offer */
+.tile input:disabled { cursor: not-allowed; }
+.tile input:disabled + .tile-body { color: var(--text-tertiary); background: var(--bg-subtle); border-style: dashed; }
+.tile:has(input:disabled):hover .tile-body { border-color: var(--border); }
+.tile input:disabled + .tile-body .tile-price { font-weight: var(--w-regular); }
 
 .stepper { display: inline-flex; align-items: center; border-radius: var(--r-pill); background: var(--gray-100); }
 .stepper button { width: 44px; height: 44px; border: 0; background: transparent; border-radius: var(--r-pill); cursor: pointer; font-size: 20px; }

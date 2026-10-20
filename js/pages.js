@@ -7,6 +7,8 @@ import { showOrders, showTracking, showAccount } from './account.js';
 
 let ctx;
 
+// Marketing pages show "from" prices: the lowest price per item across partner laundromats
+// (each laundromat sets its own; booking shows the chosen laundromat's exact prices).
 function fillPrices(p) {
   for (const el of $$('[data-price]')) {
     const [group, key] = el.dataset.price.split('.');
@@ -118,7 +120,7 @@ async function showPartners() {
   if (partnersLoaded) return;
   const list = $('#laundromatList');
   try {
-    const rows = await listLaundromats();
+    const [rows, from] = await Promise.all([listLaundromats(), fetchPricing().catch(() => null)]);
     partnersLoaded = true;
     list.removeAttribute('aria-busy');
     $('#laundromatCount').textContent = rows.length ? `${rows.length} laundromat${rows.length === 1 ? '' : 's'}` : '';
@@ -127,6 +129,7 @@ async function showPartners() {
       <article class="card stack-2">
         <h3 class="t-h4">${l.name}</h3>
         ${l.address ? html`<p class="t-small t-secondary">${l.address}</p>` : ''}
+        ${from?.laundromat_from?.[l.id] ? html`<p class="t-small">Baskets from <span class="t-medium">${money(from.laundromat_from[l.id])}</span></p>` : ''}
         ${Number(l.rating) > 0 ? html`<p class="t-small">${Number(l.rating).toFixed(1)} out of 5${l.reviews_count ? html` <span class="t-secondary">· ${l.reviews_count} reviews</span>` : ''}</p>` : ''}
         ${l.description ? html`<p class="t-small t-secondary">${String(l.description).slice(0, 180)}</p>` : ''}
         <a class="btn btn-secondary btn-sm mt-3" href="/book" data-link data-laundromat="${l.id}">Book with this laundromat</a>
