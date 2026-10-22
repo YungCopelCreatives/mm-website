@@ -407,7 +407,7 @@ button.chip:hover { background: var(--gray-200); }
 .price-list { display: grid; gap: 0; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
 .price-row { display: flex; justify-content: space-between; gap: var(--s-4); padding: var(--s-4); font-size: 15px; }
 .price-row + .price-row { border-top: 1px solid var(--border); }
-.price-row strong { font-weight: var(--w-medium); font-variant-numeric: tabular-nums; }
+.price-row strong { font-weight: var(--w-medium); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .steps { list-style: none; display: grid; gap: var(--s-6); counter-reset: none; }
 .steps li { display: flex; gap: var(--s-4); }
 
@@ -435,8 +435,10 @@ button.chip:hover { background: var(--gray-200); }
 .order-card { display: grid; gap: var(--s-3); }
 .order-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--s-3); }
 /* name + meta stacked as two lines (they are spans) */
-.order-card-head > .stack-1, .row > .stack-1 { display: grid; gap: var(--s-1); }
-.order-card-head > .stack-1 > * + *, .row > .stack-1 > * + * { margin-top: 0; }
+.order-card-head > .stack-1, .row > .stack-1, .row-between > .stack-1 { display: grid; gap: var(--s-1); }
+.order-card-head > .stack-1 > * + *, .row > .stack-1 > * + *, .row-between > .stack-1 > * + * { margin-top: 0; }
+/* Saved-address rows: label above the address, Remove stays on the right */
+.row-between > .stack-1 { flex: 1 1 0; min-width: 0; }
 .timeline { list-style: none; display: grid; gap: 0; }
 .timeline li { position: relative; display: grid; grid-template-columns: 24px 1fr; gap: var(--s-3); padding-bottom: var(--s-5); }
 .timeline li::before { content: ""; position: absolute; left: 11px; top: 24px; bottom: 0; width: 2px; background: var(--gray-200); }
@@ -461,6 +463,8 @@ button.chip:hover { background: var(--gray-200); }
 
 /* ---------- footer ---------- */
 .site-footer { background: var(--black); color: var(--white); padding: var(--s-12) 0 max(var(--s-8), env(safe-area-inset-bottom)); margin-top: var(--s-12); }
+/* A page that ends on a grey section meets the footer directly (no white band between them) */
+main:has(> .page:not([hidden]) > .section-subtle:last-child) + .site-footer { margin-top: 0; }
 .site-footer a { color: var(--white); text-decoration: none; }
 .site-footer a:hover { text-decoration: underline; }
 .footer-grid { display: grid; gap: var(--s-8); grid-template-columns: 1fr 1fr; }
@@ -471,7 +475,7 @@ button.chip:hover { background: var(--gray-200); }
 .footer-grid ul { list-style: none; display: grid; gap: 0; font-size: 14px; line-height: 20px; }
 .footer-grid ul a { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
 .footer-bottom a { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; }
-.footer-bottom { border-top: 1px solid var(--gray-700); margin-top: var(--s-10); padding-top: var(--s-6); display: flex; gap: var(--s-4); justify-content: space-between; flex-wrap: wrap; font-size: 13px; line-height: 20px; color: var(--gray-400); }
+.footer-bottom { border-top: 1px solid var(--gray-700); margin-top: var(--s-10); padding-top: var(--s-6); display: flex; gap: var(--s-4); justify-content: space-between; align-items: center; flex-wrap: wrap; font-size: 13px; line-height: 20px; color: var(--gray-400); }
 
 /* ---------- app download & open-in-app ---------- */
 .store-links { display: flex; flex-wrap: wrap; gap: var(--s-2); }
