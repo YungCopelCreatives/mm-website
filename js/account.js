@@ -2,6 +2,7 @@
 import { $, html, raw, render, money, formatDate, toast, busy, validate, store } from './ui.js';
 import {
   ORDER_STATUSES, listMyOrders, getOrder, getOrderPin, getDriver, cancelOrder, listAddresses, addAddress, deleteAddress, SERVICES, BASKET_SIZES,
+  formatPickupWindow,
 } from './orders-api.js';
 import { sb, resendVerification, refreshVerification } from './backend.js';
 import { attachAutocomplete, showMap, mapsEnabled } from './maps.js';
@@ -192,6 +193,9 @@ export async function showTracking({ params, query, session }, context) {
     }
   }
 
+  // First name only (privacy, and it is how drivers introduce themselves); "Driver" when unknown
+  const driverName = () => String(driver?.full_name || '').trim().split(/\s+/)[0] || 'Driver';
+
   function draw() {
     const flow = ORDER_STATUSES;
     const idx = flow.indexOf(order.status);
@@ -199,7 +203,7 @@ export async function showTracking({ params, query, session }, context) {
     render(root, html`
       <div class="stack-6">
         <div class="row-between">
-          <div class="stack-1"><h1 class="t-h1">Order #${order.order_number}</h1><p class="t-secondary">Booked ${formatDate(order.created_at)}${order.pickup_time ? html` · pickup ${order.pickup_time}` : ''}</p></div>
+          <div class="stack-1"><h1 class="t-h1">Order #${order.order_number}</h1>${order.pickup_time ? html`<p class="t-secondary">Pickup ${formatPickupWindow(order.pickup_time)}</p>` : ''}<p class="t-small t-secondary">Booked ${formatDate(order.created_at)}</p></div>
           ${statusBadge(order.status)}
         </div>
         ${paymentNotice()}
@@ -207,7 +211,7 @@ export async function showTracking({ params, query, session }, context) {
         ${pin ? html`<div class="card stack-2"><h2 class="t-h4">Handover PIN</h2><p class="pin">${pin}</p><p class="t-small t-secondary">Give this PIN to the driver only when your clean laundry is delivered.</p></div>` : ''}
         ${driver && driverVisible() ? html`<div class="card stack-3">
             <h2 class="t-h4">Your driver</h2>
-            <div class="row"><span class="avatar">${(driver.full_name || 'D')[0]}</span><div class="stack-1"><span class="t-medium">${driver.full_name || 'Driver'}</span><span class="t-small t-secondary">${[driver.vehicle_model || driver.vehicle_type, driver.vehicle_plate].filter(Boolean).join(' · ')}</span></div>
+            <div class="row"><span class="avatar">${driverName()[0]}</span><div class="stack-1"><span class="t-medium">${driverName()}</span><span class="t-small t-secondary">${[driver.vehicle_model || driver.vehicle_type, driver.vehicle_plate].filter(Boolean).join(' · ')}</span></div>
             ${driver.phone ? html`<a class="btn btn-secondary btn-sm" style="margin-left:auto" href="tel:${driver.phone}">Call</a>` : ''}</div>
             ${mapsEnabled ? html`<div class="map-wrap" data-map-slot ${raw(position || mapHandle ? '' : 'hidden')}></div>` : ''}
             <p class="t-small t-secondary" data-driver-updated>${positionText()}</p>

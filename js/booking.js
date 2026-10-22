@@ -10,7 +10,7 @@ import { isConfigured, resendVerification, refreshVerification } from './backend
 import { attachAutocomplete } from './maps.js';
 
 const KEY = 'mm.booking.v1';
-const STEPS = ['Laundromat and laundry', 'Pickup', 'Review and pay'];
+const STEPS = ['Your laundry', 'Pickup', 'Review and pay'];
 const DETERGENTS = [
   { id: '', label: 'Standard detergent' },
   { id: 'hypoallergenic', label: 'Hypoallergenic, fragrance-free' },
@@ -81,6 +81,9 @@ function summary() {
     </div>`;
 }
 
+// The name alone fits the select at phone width; the chosen shop's address shows underneath
+const chosenAddress = () => laundromats?.find((x) => x.id === draft.laundromat_id)?.address || '';
+
 function laundromatField() {
   return html`
     <div class="field" style="max-width:560px">
@@ -88,8 +91,9 @@ function laundromatField() {
       ${laundromats === null ? html`<div class="skeleton" style="height:48px"></div>` : laundromats.length ? html`
         <select class="select" id="bkLaundromat" name="laundromat_id" required>
           <option value="">Choose a laundromat</option>
-          ${laundromats.map((l) => html`<option value="${l.id}" ${raw(draft.laundromat_id === l.id ? 'selected' : '')}>${l.name}${l.address ? ` — ${l.address}` : ''}</option>`)}
+          ${laundromats.map((l) => html`<option value="${l.id}" ${raw(draft.laundromat_id === l.id ? 'selected' : '')}>${l.name}</option>`)}
         </select>
+        ${chosenAddress() ? html`<span class="hint">${chosenAddress()}</span>` : ''}
         <span class="hint">Each laundromat sets its own prices. See all <a class="text-link" href="/partners" data-link>partner laundromats</a>.</span>` : html`
         <div class="notice notice-warning">No partner laundromats are available right now. Please try again later.</div>`}
     </div>`;

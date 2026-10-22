@@ -236,6 +236,7 @@ body.no-scroll { overflow: hidden; }
 .input[aria-invalid="true"], .select[aria-invalid="true"], .textarea[aria-invalid="true"] { border-color: var(--negative); }
 .select {
   appearance: none; -webkit-appearance: none; padding-right: var(--s-10);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 16px center;
 }
@@ -466,6 +467,8 @@ button.chip:hover { background: var(--gray-200); }
 /* A page that ends on a grey section meets the footer directly (no white band between them) */
 main:has(> .page:not([hidden]) > .section-subtle:last-child) + .site-footer { margin-top: 0; }
 .site-footer a { color: var(--white); text-decoration: none; }
+/* The colour mark is dark teal on transparent and disappears on black: show it as a white mark */
+.site-footer .brand img { filter: brightness(0) invert(1); }
 .site-footer a:hover { text-decoration: underline; }
 .footer-grid { display: grid; gap: var(--s-8); grid-template-columns: 1fr 1fr; }
 @media (min-width: 960px) { .footer-grid { grid-template-columns: 2fr 1fr 1fr 1fr; } }

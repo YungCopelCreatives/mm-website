@@ -28,15 +28,45 @@ export const BASKET_SIZES = {
 
 export const MAX_ITEMS = 20;
 
-// Same labels as the app (src/lib/scheduling.ts) so pickup_time reads the same everywhere.
+// Shown on the 24-hour clock like the app ("08:00 – 10:00"). `stored` is the app's slot label
+// (src/lib/scheduling.ts), still what goes into orders.pickup_time so both clients write the same text.
 export const TIME_SLOTS = [
-  { id: 'morning_1', label: '08:00 AM - 10:00 AM', start: '08:00' },
-  { id: 'morning_2', label: '10:00 AM - 12:00 PM', start: '10:00' },
-  { id: 'afternoon_1', label: '12:00 PM - 02:00 PM', start: '12:00' },
-  { id: 'afternoon_2', label: '02:00 PM - 04:00 PM', start: '14:00' },
-  { id: 'evening_1', label: '04:00 PM - 06:00 PM', start: '16:00' },
-  { id: 'evening_2', label: '06:00 PM - 08:00 PM', start: '18:00' },
+  { id: 'morning_1', label: '08:00 – 10:00', stored: '08:00 AM - 10:00 AM', start: '08:00', end: '10:00' },
+  { id: 'morning_2', label: '10:00 – 12:00', stored: '10:00 AM - 12:00 PM', start: '10:00', end: '12:00' },
+  { id: 'afternoon_1', label: '12:00 – 14:00', stored: '12:00 PM - 02:00 PM', start: '12:00', end: '14:00' },
+  { id: 'afternoon_2', label: '14:00 – 16:00', stored: '02:00 PM - 04:00 PM', start: '14:00', end: '16:00' },
+  { id: 'evening_1', label: '16:00 – 18:00', stored: '04:00 PM - 06:00 PM', start: '16:00', end: '18:00' },
+  { id: 'evening_2', label: '18:00 – 20:00', stored: '06:00 PM - 08:00 PM', start: '18:00', end: '20:00' },
 ];
+
+const to24 = (hhmm, ampm) => {
+  let [h, m] = hhmm.split(':').map(Number);
+  if (ampm) {
+    const pm = ampm.toUpperCase() === 'PM';
+    if (pm && h < 12) h += 12;
+    if (!pm && h === 12) h = 0;
+  }
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+};
+
+/**
+ * Human pickup window from orders.pickup_time, which is free text written by the app or the site:
+ * "2026-10-22 08:00 AM - 10:00 AM", "2026-10-22 08:00" or already friendly text.
+ * Returns e.g. "Thu 22 Oct, 08:00 – 10:00"; unknown shapes are returned unchanged.
+ */
+export function formatPickupWindow(value) {
+  if (!value) return '';
+  const m = String(value).trim().match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2})(?::\d{2})?\s*(AM|PM)?(?:\s*[-–]\s*(\d{1,2}:\d{2})\s*(AM|PM)?)?)?$/i);
+  if (!m) return String(value);
+  const [, date, start, startAp, end, endAp] = m;
+  const d = new Date(`${date}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return String(value);
+  const day = d.toLocaleDateString('en-ZA', { weekday: 'short', day: 'numeric', month: 'short' }).replace(/,/g, '');
+  if (!start) return day;
+  const from = to24(start, startAp);
+  const to = end ? to24(end, endAp || startAp) : TIME_SLOTS.find((s) => s.start === from)?.end;
+  return `${day}, ${from}${to ? ` – ${to}` : ''}`;
+}
 
 const num = (v, d) => (v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : d);
 
@@ -92,7 +122,7 @@ export function estimate(pricing, draft) {
 
 export function pickupTimeString(draft) {
   const slot = TIME_SLOTS.find((s) => s.id === draft.pickup_slot);
-  return draft.pickup_date && slot ? `${draft.pickup_date} ${slot.label}` : '';
+  return draft.pickup_date && slot ? `${draft.pickup_date} ${slot.stored}` : '';
 }
 
 /**
