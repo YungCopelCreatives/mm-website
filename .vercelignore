@@ -1,0 +1,2 @@
+# Supabase edge-function sources (Deno) are deployed with the Supabase CLI, not Vercel.
+supabase-functions-to-add/
