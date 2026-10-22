@@ -1,21 +1,14 @@
-// Backend-powered pages. Loaded lazily by main.js so the marketing pages never wait for it.
-import { $, $$, html, render, money, toast, busy, validate, setStatus } from './ui.js';
-import { onSession, signIn, signUp, googleSignIn, resetPassword, signOut, callFunction, isConfigured } from './backend.js';
-import { fetchPricing, listLaundromats } from './orders-api.js';
+// Account pages (sign-in, booking, orders, tracking, account). Loaded lazily by main.js only when
+// a page needs them or the visitor is signed in, so marketing pages never download the SDKs.
+import { $, $$, toast, busy, validate, setStatus } from './ui.js';
+import {
+  onSession, signIn, signUp, googleSignIn, resetPassword, signOut, isConfigured, startPhoneSignIn, confirmPhoneCode,
+} from './backend.js';
+import { normaliseSAPhone, normaliseProfilePhone, formatSAPhone } from './phone.js';
 import { showBooking } from './booking.js';
 import { showOrders, showTracking, showAccount } from './account.js';
 
 let ctx;
-
-// Marketing pages show "from" prices: the lowest price per item across partner laundromats
-// (each laundromat sets its own; booking shows the chosen laundromat's exact prices).
-function fillPrices(p) {
-  for (const el of $$('[data-price]')) {
-    const [group, key] = el.dataset.price.split('.');
-    const v = key ? (group === 'basket' ? p.basket_pricing[key] : p.item_pricing[key]) : p[group];
-    if (Number.isFinite(Number(v))) el.textContent = money(v);
-  }
-}
 
 // ---------- auth pages ----------
 // The router may already have moved off the auth page when Firebase reported the new user,
@@ -43,13 +36,16 @@ function bindAuth() {
     const restore = busy(form.querySelector('[type=submit]'), 'Creating account');
     const next = ctx.safeNext();
     setStatus(form, '');
+    const phone = normaliseProfilePhone(f.get('phone'));
+    if (!phone) { restore(); setStatus(form, 'Enter a valid mobile number, for example 082 555 0175.', 'error'); $('#suPhone').focus(); return; }
     try {
-      await signUp({ full_name: String(f.get('full_name')).trim(), email: String(f.get('email')).trim(), phone: String(f.get('phone')).trim(), password: String(f.get('password')) });
+      await signUp({ full_name: String(f.get('full_name')).trim(), email: String(f.get('email')).trim(), phone, password: String(f.get('password')) });
       form.reset();
       toast('Account created. Check your email to verify your address.', 'positive');
       afterAuth(next);
     } catch (err) { setStatus(form, err.message, 'error'); } finally { restore(); }
   });
+  bindPhoneLogin();
   $('#resetForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const form = e.target;
@@ -77,68 +73,61 @@ function bindAuth() {
   });
 }
 
-// ---------- public forms -> submit-form edge function ----------
-const FORM_FIELDS = {
-  contact: ['name', 'email', 'phone', 'topic', 'order_number', 'message'],
-  business_inquiry: ['company_name', 'contact_name', 'email', 'phone', 'industry', 'weekly_volume', 'notes'],
-  driver_application: ['full_name', 'email', 'phone', 'city', 'vehicle_type'],
-  laundromat_application: ['business_name', 'contact_name', 'email', 'phone', 'address', 'machines'],
-};
-const SUCCESS = {
-  contact: 'Thanks, your message has been sent. We usually reply within a few hours.',
-  business_inquiry: 'Thanks. Our business team will contact you within one working day.',
-  driver_application: 'Thanks for applying. We will contact you about the next steps.',
-  laundromat_application: 'Thanks. Our partner team will contact you about the next steps.',
-};
-
-function bindForms() {
-  for (const form of $$('form[data-form]')) {
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      if (!validate(form)) return;
-      const kind = form.dataset.form;
-      const f = new FormData(form);
-      const fields = {};
-      for (const k of FORM_FIELDS[kind]) { const v = String(f.get(k) ?? '').trim(); if (v) fields[k] = v; }
-      const body = { form: kind, fields, consent: f.get('consent') === 'on', website: String(f.get('website') || ''), page: location.pathname };
-      const restore = busy(form.querySelector('[type=submit]'), 'Sending');
-      setStatus(form, '');
-      try {
-        await callFunction('submit-form', { body });
-        form.reset();
-        setStatus(form, SUCCESS[kind], 'ok');
-      } catch (err) {
-        setStatus(form, err.status === 429 ? 'Too many submissions. Please try again later.' : err.message || 'We could not send this. Please try again.', 'error');
-      } finally { restore(); }
+// ---------- phone (SMS code) sign-in ----------
+function bindPhoneLogin() {
+  const form = $('#phoneForm');
+  const tabs = $$('[data-login-tab]');
+  const select = (which) => {
+    for (const t of tabs) {
+      const on = t.dataset.loginTab === which;
+      t.setAttribute('aria-selected', String(on));
+      t.tabIndex = on ? 0 : -1;
+    }
+    form.hidden = which !== 'phone';
+    $('#loginForm').hidden = which === 'phone';
+  };
+  for (const t of tabs) {
+    t.addEventListener('click', () => select(t.dataset.loginTab));
+    t.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      const next = tabs[(tabs.indexOf(t) + 1) % tabs.length];
+      select(next.dataset.loginTab); next.focus();
     });
   }
-}
-
-// ---------- partners ----------
-let partnersLoaded = false;
-async function showPartners() {
-  if (partnersLoaded) return;
-  const list = $('#laundromatList');
-  try {
-    const [rows, from] = await Promise.all([listLaundromats(), fetchPricing().catch(() => null)]);
-    partnersLoaded = true;
-    list.removeAttribute('aria-busy');
-    $('#laundromatCount').textContent = rows.length ? `${rows.length} laundromat${rows.length === 1 ? '' : 's'}` : '';
-    if (!rows.length) { render(list, html`<div class="empty"><p class="t-secondary">Our partner list is being updated. Check back soon.</p></div>`); return; }
-    render(list, html`${rows.map((l) => html`
-      <article class="card stack-2">
-        <h3 class="t-h4">${l.name}</h3>
-        ${l.address ? html`<p class="t-small t-secondary">${l.address}</p>` : ''}
-        ${from?.laundromat_from?.[l.id] ? html`<p class="t-small">Baskets from <span class="t-medium">${money(from.laundromat_from[l.id])}</span></p>` : ''}
-        ${Number(l.rating) > 0 ? html`<p class="t-small">${Number(l.rating).toFixed(1)} out of 5${l.reviews_count ? html` <span class="t-secondary">· ${l.reviews_count} reviews</span>` : ''}</p>` : ''}
-        ${l.description ? html`<p class="t-small t-secondary">${String(l.description).slice(0, 180)}</p>` : ''}
-        <a class="btn btn-secondary btn-sm mt-3" href="/book" data-link data-laundromat="${l.id}">Book with this laundromat</a>
-      </article>`)}`);
-  } catch (err) {
-    console.warn('laundromats', err?.message);
-    list.removeAttribute('aria-busy');
-    render(list, html`<div class="notice notice-negative">We could not load our partner list. Please refresh the page.</div>`);
-  }
+  const numberStep = $('[data-phone-step="number"]', form);
+  const codeStep = $('[data-phone-step="code"]', form);
+  const submit = $('[data-phone-submit]', form);
+  const restart = $('[data-action="phone-restart"]', form);
+  const reset = () => {
+    numberStep.hidden = false; codeStep.hidden = true; restart.hidden = true;
+    $('#liPhone').required = true; $('#liCode').required = false; $('#liCode').value = '';
+    submit.textContent = 'Send code';
+    setStatus(form, '');
+  };
+  restart.addEventListener('click', () => { reset(); $('#liPhone').focus(); });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!validate(form)) return;
+    setStatus(form, '');
+    const next = ctx.safeNext();
+    if (codeStep.hidden) {
+      const e164 = normaliseSAPhone($('#liPhone').value);
+      if (!e164) { setStatus(form, 'Enter a valid South African mobile number, for example 082 555 0175.', 'error'); $('#liPhone').focus(); return; }
+      const restore = busy(submit, 'Sending code');
+      try {
+        await startPhoneSignIn(e164, 'phoneRecaptcha');
+        restore();
+        numberStep.hidden = true; codeStep.hidden = false; restart.hidden = false;
+        $('#liPhone').required = false; $('#liCode').required = true;
+        $('[data-phone-sent]', form).textContent = `We sent a code to ${formatSAPhone(e164)}.`;
+        submit.textContent = 'Log in';
+        $('#liCode').focus();
+      } catch (err) { restore(); setStatus(form, err.message, 'error'); }
+      return;
+    }
+    const restore = busy(submit, 'Checking code');
+    try { await confirmPhoneCode($('#liCode').value.trim()); restore(); reset(); afterAuth(next); } catch (err) { restore(); setStatus(form, err.message, 'error'); }
+  });
 }
 
 export function init(context) {
@@ -148,21 +137,7 @@ export function init(context) {
   ctx.registerPage('/orders', (a) => showOrders(a, pageCtx));
   ctx.registerPage('/orders/:id', (a) => showTracking(a, pageCtx));
   ctx.registerPage('/account', (a) => showAccount(a, pageCtx));
-  ctx.registerPage('/partners', () => showPartners());
   bindAuth();
-  bindForms();
-
-  // "Book with this laundromat" pre-selects it in the booking draft.
-  document.addEventListener('click', (e) => {
-    const a = e.target.closest('[data-laundromat]');
-    if (!a) return;
-    try {
-      const d = JSON.parse(sessionStorage.getItem('mm.booking.v1') || '{}');
-      sessionStorage.setItem('mm.booking.v1', JSON.stringify({ ...d, laundromat_id: a.dataset.laundromat }));
-    } catch { /* storage unavailable */ }
-  }, true);
-
-  fetchPricing().then(fillPrices);
   onSession(ctx.onSession);
   if (!isConfigured) ctx.onSession({ user: null, profile: null, ready: true });
   ctx.route();

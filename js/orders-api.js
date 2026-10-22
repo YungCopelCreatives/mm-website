@@ -8,6 +8,7 @@
 //
 // Orders are read back through Supabase under RLS (customers can read their own rows).
 import { callFunction, sb } from './backend.js';
+import { getPricing, normalizePricing, listLaundromatsPublic } from './public-api.js';
 
 export const SERVICES = {
   wash_fold: { label: 'Wash & fold', kind: 'basket', unit: 'basket' },
@@ -37,77 +38,18 @@ export const TIME_SLOTS = [
   { id: 'evening_2', label: '06:00 PM - 08:00 PM', start: '18:00' },
 ];
 
-/** "From" prices shown until get-pricing answers (and if it cannot be reached). Server prices always win at checkout. */
-export const DEFAULT_PRICING = Object.freeze({
-  currency: 'ZAR',
-  basket_pricing: { small: 140, medium: 220, large: 310, family: 430 },
-  item_pricing: { sneakers: 125, blankets: 130, carpets: 180, dry_clean: 115 },
-  delivery_fee: 45,
-  free_delivery_threshold: 350,
-  service_fee: 0,
-  protection_fee: 0,
-  vat_rate: 0.15,
-  prices_include_vat: true,
-  live: false,
-});
+const num = (v, d) => (v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : d);
 
-const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+// Prices come only from get-pricing (each laundromat's own published prices); see public-api.js.
+export { normalizePricing } from './public-api.js';
+/** No prices known yet (before a laundromat is chosen or while its prices load). */
+export const EMPTY_PRICING = Object.freeze(normalizePricing(null));
 
 /**
- * Normalises a get-pricing response. For one laundromat (`laundromatId` set) a missing price
- * means "not offered"; for the "from" prices a missing value falls back to the defaults.
+ * fetchPricing()            "from" prices (lowest across partner laundromats)
+ * fetchPricing(laundromatId) that laundromat's prices; `unpublished` / `unavailable` flags when missing
  */
-export function normalizePricing(r, laundromatId = null) {
-  if (!r || typeof r !== 'object') return laundromatId ? { ...DEFAULT_PRICING, laundromat_id: laundromatId, unavailable: true } : DEFAULT_PRICING;
-  const d = DEFAULT_PRICING;
-  const pick = (src, dflt) => {
-    const out = {};
-    for (const k of Object.keys(dflt)) {
-      const v = Number(src?.[k]);
-      if (Number.isFinite(v) && v > 0) out[k] = v;
-      else if (!laundromatId) out[k] = dflt[k];
-    }
-    return out;
-  };
-  const from = {};
-  for (const [k, v] of Object.entries(r.laundromat_from || {})) if (Number.isFinite(Number(v)) && Number(v) > 0) from[k] = Number(v);
-  return {
-    currency: r.currency || 'ZAR',
-    laundromat_id: laundromatId,
-    basket_pricing: pick(r.basket_pricing, d.basket_pricing),
-    item_pricing: pick(r.item_pricing, d.item_pricing),
-    laundromat_from: from,
-    delivery_fee: num(r.delivery_fee, d.delivery_fee),
-    free_delivery_threshold: num(r.free_delivery_threshold, d.free_delivery_threshold),
-    service_fee: num(r.service_fee, d.service_fee),
-    protection_fee: num(r.protection_fee, d.protection_fee),
-    vat_rate: num(r.vat_rate, d.vat_rate),
-    prices_include_vat: r.prices_include_vat !== false,
-    live: true,
-  };
-}
-
-const pricingCache = new Map();
-/**
- * fetchPricing()            "from" prices (lowest across partner laundromats) for marketing pages
- * fetchPricing(laundromatId) that laundromat's prices; `unavailable: true` if it has none published
- */
-export function fetchPricing(laundromatId = null) {
-  const key = laundromatId || '';
-  if (!pricingCache.has(key)) {
-    const path = laundromatId ? `get-pricing?laundromat_id=${encodeURIComponent(laundromatId)}` : 'get-pricing';
-    const p = callFunction(path, { method: 'GET' })
-      .then((r) => normalizePricing(r, laundromatId))
-      .catch((err) => {
-        pricingCache.delete(key);
-        if (laundromatId && err.status === 404) return { ...normalizePricing({}, laundromatId), unpublished: true };
-        console.warn('get-pricing unavailable, showing default prices:', err.message);
-        return laundromatId ? normalizePricing(null, laundromatId) : DEFAULT_PRICING;
-      });
-    pricingCache.set(key, p);
-  }
-  return pricingCache.get(key);
-}
+export const fetchPricing = (laundromatId = null) => getPricing(laundromatId);
 
 /** True when the laundromat behind `pricing` offers this service (and basket size). */
 export function offers(pricing, service, basketSize) {
@@ -136,10 +78,12 @@ export function estimate(pricing, draft) {
   const qty = svc.kind === 'basket' ? 1 : Math.max(1, Math.min(MAX_ITEMS, Math.trunc(num(draft.item_count, 1))));
   const price = unitPrice(pricing, draft);
   const subtotal = price * qty;
-  const delivery_fee = subtotal < pricing.free_delivery_threshold ? pricing.delivery_fee : 0;
+  const threshold = num(pricing.free_delivery_threshold, null);
+  const delivery_fee = threshold !== null && subtotal >= threshold ? 0 : num(pricing.delivery_fee, 0);
   const service_fee = pricing.service_fee || 0;
   const total_amount = Math.round((subtotal + delivery_fee + service_fee) * 100) / 100;
-  const tax_amount = Math.round((total_amount - total_amount / (1 + pricing.vat_rate)) * 100) / 100;
+  const vat = num(pricing.vat_rate, 0);
+  const tax_amount = vat > 0 ? Math.round((total_amount - total_amount / (1 + vat)) * 100) / 100 : 0;
   const label = svc.kind === 'basket'
     ? `${svc.label} · ${BASKET_SIZES[draft.basket_size]?.label || ''}`
     : `${svc.label} · ${qty} ${svc.unit}${qty === 1 ? '' : 's'}`;
@@ -227,12 +171,12 @@ export async function getOrderPin(orderId) {
   return data?.pin || null;
 }
 
-/** Driver card + live position, visible to the customer only while the order is active (RLS: is_counterparty). */
+/** Driver card (name, phone, vehicle), visible to the customer only while the order is active (RLS: is_counterparty). Live position: realtime-adapter.js. */
 export async function getDriver(driverId) {
   if (!driverId) return null;
   const [{ data: profile }, { data: drv }] = await Promise.all([
     sb.from('profiles').select('full_name, phone').eq('id', driverId).maybeSingle(),
-    sb.from('drivers').select('vehicle_model, vehicle_plate, vehicle_type, current_lat, current_lng, updated_at').eq('profile_id', driverId).maybeSingle(),
+    sb.from('drivers').select('vehicle_model, vehicle_plate, vehicle_type').eq('profile_id', driverId).maybeSingle(),
   ]);
   if (!profile && !drv) return null;
   return { ...(profile || {}), ...(drv || {}) };
@@ -244,12 +188,8 @@ export async function cancelOrder(id) {
   if (error) throw error;
 }
 
-// Public partner list (RLS: laundromats_select is open to anon).
-export async function listLaundromats() {
-  const { data, error } = await sb.from('laundromats').select('id, name, address, rating, reviews_count, image_url, description').order('name');
-  if (error) throw error;
-  return data || [];
-}
+// Partner list for booking: verified laundromats only (RLS hides unverified ones from visitors).
+export const listLaundromats = () => listLaundromatsPublic();
 
 export async function listAddresses(uid) {
   const { data, error } = await sb.from('addresses').select('id, label, address, latitude, longitude, is_default, created_at').eq('user_id', uid)

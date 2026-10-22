@@ -7,9 +7,11 @@ import {
   initializeApp, getAuth, onAuthStateChanged, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, updateProfile, sendEmailVerification, sendPasswordResetEmail,
   GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut as fbSignOut,
+  RecaptchaVerifier, signInWithPhoneNumber,
   initializeAppCheck, ReCaptchaEnterpriseProvider, getToken as getAppCheckTokenRaw,
 } from '/vendor/firebase.js';
 import { createClient } from '/vendor/supabase.js';
+import { phoneAuthErrorMessage } from './phone.js';
 
 const cfg = window.__MM_CONFIG__ || {};
 const fb = cfg.firebase || {};
@@ -108,7 +110,14 @@ export const session = () => current;
 export function onSession(cb) { listeners.add(cb); if (current.ready) cb(current); return () => listeners.delete(cb); }
 function emit() { for (const cb of listeners) { try { cb(current); } catch (e) { console.error(e); } } }
 
-/** Makes sure the shared `profiles` row exists (the app does the same on first sign-in). */
+/**
+ * Makes sure the shared `profiles` row exists, with the same fields the app writes:
+ *  - website sign-up form  = the app's SignUp screen (customer, onboarding completed)
+ *  - first Google or phone sign-in = the app's AuthContext (customer, onboarding pending, so the
+ *    app asks the remaining questions the first time they open it)
+ * Phone numbers are E.164 (+27...), like the app's phone sign-in. `is_verified` and `kyc_status`
+ * are set by database triggers (email_verified / phone_number claims), never by the client.
+ */
 export async function ensureProfile(user, extra = {}) {
   const { data, error } = await sb.from('profiles')
     .select('id, full_name, email, phone, user_type, is_verified').eq('id', user.uid).maybeSingle();
@@ -124,11 +133,12 @@ export async function ensureProfile(user, extra = {}) {
   }
   const row = {
     id: user.uid,
-    full_name: (extra.full_name || user.displayName || user.email?.split('@')[0] || 'Customer').slice(0, 100),
-    email: user.email,
-    phone: extra.phone || user.phoneNumber || null,
+    full_name: (extra.full_name || user.displayName || user.email?.split('@')[0] || 'Member').slice(0, 100),
+    email: user.email || null,
+    phone: user.phoneNumber || extra.phone || null,
     user_type: 'customer',
-    onboarding_status: 'completed',
+    onboarding_status: extra.fromSignupForm ? 'completed' : 'pending',
+    avatar_url: user.photoURL || null,
   };
   const { data: created, error: insErr } = await sb.from('profiles').insert(row)
     .select('id, full_name, email, phone, user_type, is_verified').single();
@@ -144,6 +154,8 @@ onAuthStateChanged(auth, async (user) => {
     pendingProfileExtra = null;
   }
   current = { user, profile, ready: true };
+  // Hint for main.js: load the account UI early on the next visit (the SDK is otherwise lazy).
+  try { if (user) localStorage.setItem('mm.auth', '1'); else localStorage.removeItem('mm.auth'); } catch { /* storage unavailable */ }
   emit();
 });
 getRedirectResult(auth).catch(() => { /* no redirect pending */ });
@@ -172,7 +184,7 @@ export async function signIn(email, password) {
 }
 export async function signUp({ full_name, email, phone, password }) {
   guard();
-  pendingProfileExtra = { full_name, phone };
+  pendingProfileExtra = { full_name, phone, fromSignupForm: true };
   try {
     const { user } = await createUserWithEmailAndPassword(auth, email, password);
     await updateProfile(user, { displayName: full_name }).catch(() => {});
@@ -215,3 +227,25 @@ export async function refreshVerification() {
   return current;
 }
 export async function signOut() { await fbSignOut(auth); }
+
+// ---- Phone (SMS code) sign-in, same Firebase accounts as the app's phone sign-in ----
+let recaptcha = null;
+let confirmation = null;
+/** Sends the SMS code to an E.164 number. `containerId` hosts the invisible reCAPTCHA. */
+export async function startPhoneSignIn(e164, containerId) {
+  guard();
+  try {
+    if (!recaptcha) recaptcha = new RecaptchaVerifier(auth, containerId, { size: 'invisible' });
+    confirmation = await signInWithPhoneNumber(auth, e164, recaptcha);
+  } catch (e) {
+    try { recaptcha?.clear(); } catch { /* ignore */ }
+    recaptcha = null;
+    throw new Error(phoneAuthErrorMessage(e));
+  }
+}
+/** Confirms the 6-digit SMS code and signs in (the profile row is created on first sign-in). */
+export async function confirmPhoneCode(code) {
+  guard();
+  if (!confirmation) throw new Error('Request a new code first.');
+  try { return (await confirmation.confirm(code)).user; } catch (e) { throw new Error(phoneAuthErrorMessage(e)); }
+}

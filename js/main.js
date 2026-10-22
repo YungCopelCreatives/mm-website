@@ -1,7 +1,14 @@
-// Entry point: client-side router, header state and lazy loading of the backend-powered pages.
-// Marketing pages work even if the backend bundle cannot load.
+// Entry point: client-side router, header state and lazy loading.
+//  - marketing.js (light, no SDK): live prices, partner list, forms. Loaded on every page.
+//  - pages.js (Firebase + Supabase SDKs, ~420 KB): only on pages that need an account, or when
+//    this browser was signed in last time (to show the account menu), or on idle otherwise never.
+// Marketing pages work even if neither can load.
 import { $, $$ } from './ui.js';
 import { initNav, onRouteChange } from './nav.js';
+import { renderAppCtas } from './site.js';
+
+// Routes that need sign-in or the SDKs. Keep in sync with data-auth-required / pages.js.
+const ACCOUNT_ROUTES = new Set(['/book', '/orders', '/orders/:id', '/account', '/login', '/signup', '/forgot-password']);
 
 const pages = $$('[data-route]');
 const hooks = new Map();
@@ -10,6 +17,7 @@ let pagesModule = null;
 let firstRender = true;
 let previousRoute = null;
 let previousPath = null;
+let accountLoading = null;
 
 export function registerPage(route, fn) { hooks.set(route, fn); }
 export function getSession() { return currentSession; }
@@ -62,6 +70,10 @@ export function route({ focus = false } = {}) {
   for (const p of pages) p.hidden = p !== m.el;
   document.title = m.el.dataset.title || 'M&M Laundry';
   onRouteChange(path);
+
+  renderAppCtas(m.el);
+  document.dispatchEvent(new CustomEvent('mm:route', { detail: location.pathname }));
+  if (ACCOUNT_ROUTES.has(m.route)) loadAccount();
 
   const hook = hooks.get(m.route);
   if (hook) {
@@ -133,15 +145,36 @@ for (const el of $$('[data-year]')) el.textContent = String(new Date().getFullYe
 route();
 initServiceWorker();
 
-import('./pages.js')
-  .then((mod) => { pagesModule = mod; mod.init({ registerPage, onSession: applySession, navigate, route, getSession, safeNext }); })
-  .catch((err) => {
-    console.error('M&M: the booking and account features could not load.', err);
-    currentSession = { user: null, profile: null, ready: true };
-    for (const id of ['bookApp', 'ordersApp', 'trackApp', 'accountApp']) {
-      const el = document.getElementById(id);
-      if (el) el.innerHTML = '<div class="notice notice-negative">This part of the site could not load. Refresh the page or try again later.</div>';
-    }
-  });
+function loadAccount() {
+  if (!accountLoading) {
+    accountLoading = import('./pages.js')
+      .then((mod) => { pagesModule = mod; mod.init({ registerPage, onSession: applySession, navigate, route, getSession, safeNext }); })
+      .catch((err) => {
+        console.error('M&M: the booking and account features could not load.', err);
+        currentSession = { user: null, profile: null, ready: true };
+        for (const id of ['bookApp', 'ordersApp', 'trackApp', 'accountApp']) {
+          const el = document.getElementById(id);
+          if (el) el.innerHTML = '<div class="notice notice-negative">This part of the site could not load. Refresh the page or try again later.</div>';
+        }
+      });
+  }
+  return accountLoading;
+}
+
+const idle = (fn) => (window.requestIdleCallback ? requestIdleCallback(fn, { timeout: 2000 }) : setTimeout(fn, 200));
+
+import('./marketing.js')
+  .then((mod) => { mod.initMarketing({ registerPage }); if ((location.pathname.replace(/\/+$/, '') || '/') === '/partners') mod.showPartners(); })
+  .catch((err) => console.warn('M&M: prices and forms could not load.', err));
+
+// Signed in last time: load the account UI soon so the header shows the account menu.
+let wasSignedIn = false;
+try { wasSignedIn = localStorage.getItem('mm.auth') === '1'; } catch { /* storage unavailable */ }
+if (wasSignedIn) idle(loadAccount);
+// Warm the SDKs when the visitor heads for an account page.
+document.addEventListener('pointerover', (e) => {
+  const a = e.target.closest?.('a[href^="/book"], a[href^="/login"], a[href^="/signup"], a[href^="/orders"], a[href^="/account"]');
+  if (a) loadAccount();
+}, { passive: true });
 
 export const _debug = () => ({ pagesModule, currentSession });

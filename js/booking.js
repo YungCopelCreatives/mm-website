@@ -3,7 +3,7 @@
 // laundromat's prices (get-pricing?laundromat_id=…); create-order charges exactly those.
 import { $, $$, html, raw, render, money, toast, busy, uuid, store, validate } from './ui.js';
 import {
-  SERVICES, BASKET_SIZES, TIME_SLOTS, MAX_ITEMS, fetchPricing, DEFAULT_PRICING, estimate, quoteOrder, createOrder, offers, fromBasketPrice,
+  SERVICES, BASKET_SIZES, TIME_SLOTS, MAX_ITEMS, fetchPricing, EMPTY_PRICING, estimate, quoteOrder, createOrder, offers, fromBasketPrice,
   returnUrlFor, isSafePaymentUrl, listLaundromats, listAddresses, addAddress,
 } from './orders-api.js';
 import { isConfigured, resendVerification, refreshVerification } from './backend.js';
@@ -18,7 +18,7 @@ const DETERGENTS = [
 
 let ctx = null;          // { navigate, getSession }
 let draft = null;
-let pricing = DEFAULT_PRICING; // the chosen laundromat's prices ("from" prices until one is chosen)
+let pricing = EMPTY_PRICING; // the chosen laundromat's prices (none until one is chosen and its prices load)
 let pricingFor = '';           // laundromat id `pricing` belongs to ('' = "from" prices)
 let laundromats = null;  // null = loading
 let addresses = [];
@@ -76,7 +76,7 @@ function summary() {
         ${est.protection_fee ? html`<div class="kv-row"><dt>Protection</dt><dd>${money(est.protection_fee)}</dd></div>` : ''}
         <div class="kv-row kv-total"><dt>${est.estimated ? 'Estimated total' : 'Total'}</dt><dd>${money(est.total_amount)}</dd></div>
       </dl>
-      <p class="t-caption t-secondary">Includes VAT${est.tax_amount ? html` of ${money(est.tax_amount)}` : ''}. ${est.delivery_fee ? html`Free delivery from ${money(pricing.free_delivery_threshold)}.` : ''}</p>
+      <p class="t-caption t-secondary">Includes VAT${est.tax_amount ? html` of ${money(est.tax_amount)}` : ''}. ${est.delivery_fee && Number(pricing.free_delivery_threshold) > 0 ? html`Free delivery from ${money(pricing.free_delivery_threshold)}.` : ''}</p>
       ${l ? html`<p class="t-small t-secondary">Laundromat: <span class="t-medium" style="color:var(--text)">${l.name}</span></p>` : ''}
     </div>`;
 }
@@ -210,10 +210,12 @@ function stepReview() {
       ${isConfigured && !user ? html`
         <div class="card card-subtle stack-3">
           <h2 class="t-h4">Log in to pay</h2>
-          <p class="t-small t-secondary">Your booking is saved. Use the same account as the M&amp;M app.</p>
+          <p class="t-small t-secondary">Your booking is saved. Use the same email or mobile number as in the M&amp;M app.</p>
           <div class="row"><a class="btn btn-primary" href="/login?next=/book" data-link>Log in</a><a class="btn btn-secondary" href="/signup?next=/book" data-link>Create account</a></div>
         </div>` : ''}
-      ${isConfigured && user && !verified ? html`
+      ${isConfigured && user && !verified && !user.email ? html`
+        <div class="notice notice-warning"><p>Your account is not verified yet. Sign out and sign in again with your mobile number, or <a class="text-link" href="/contact" data-link>contact us</a>.</p></div>` : ''}
+      ${isConfigured && user && !verified && user.email ? html`
         <div class="notice notice-warning"><div class="stack-2">
           <p>Please verify your email address before paying. We sent a link to <strong>${user.email}</strong>.</p>
           <div class="row"><button type="button" class="btn btn-secondary btn-sm" data-action="resend-verification">Resend email</button><button type="button" class="btn btn-tertiary btn-sm" data-action="check-verification">I have verified</button></div>

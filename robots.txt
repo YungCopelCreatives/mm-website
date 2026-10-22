@@ -7,5 +7,6 @@ Disallow: /orders
 Disallow: /login
 Disallow: /signup
 Disallow: /forgot-password
+Disallow: /kyc
 
 Sitemap: __SITE_URL__/sitemap.xml
