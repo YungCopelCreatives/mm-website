@@ -37,7 +37,8 @@
   --brand: #276EF1;
   --brand-hover: #1E5BD0;
   --brand-deep: #1A4FB5;
-  --on-brand-muted: rgba(255, 255, 255, 0.82);
+  /* Full white: any tint of white on the brand blue drops below 4.5:1 for small text */
+  --on-brand-muted: #FFFFFF;
   --on-brand-line: rgba(255, 255, 255, 0.28);
   --accent-soft: #EFF3FE;
   --positive: #05944F;

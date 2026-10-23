@@ -1,14 +1,14 @@
 // M&M Laundry service worker: offline shell and static asset caching.
 // Never caches personal data: Supabase, Firebase and edge-function calls go to other origins
 // and are not intercepted. Bump SW_VERSION whenever a precached file changes.
-const SW_VERSION = '3.3.0';
+const SW_VERSION = '3.3.1';
 const CACHE_PREFIX = 'mm-laundry-';
 const STATIC_CACHE = `${CACHE_PREFIX}static-${SW_VERSION}`;
 const RUNTIME_CACHE = `${CACHE_PREFIX}runtime-${SW_VERSION}`;
 
 const STATIC_ASSETS = [
   '/',
-  '/styles.css?v=3.3.0',
+  '/styles.css?v=3.3.1',
   '/js/main.js?v=3.3.0',
   '/js/ui.js',
   '/js/nav.js',
