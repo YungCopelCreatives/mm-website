@@ -1,0 +1,101 @@
+# M&M Laundry — website
+
+Marketing site and customer web app (vanilla HTML/CSS/ES modules) served by a small Express
+server. The website uses **the same accounts, database and APIs as the M&M mobile app**:
+
+| Concern | Backend |
+| --- | --- |
+| Sign up / log in / Google sign-in / password reset / email verification | Firebase Auth (browser SDK) |
+| Profile, saved addresses, orders, tracking, handover PIN, driver card, partner list | Supabase Postgres under RLS, with the Firebase ID token as a third-party JWT |
+| Live order tracking | Supabase Realtime on `orders` and `driver_locations` plus `rpc get_order_driver_location` (same as the app; names in `js/realtime-adapter.js`) |
+| Prices | `GET {SUPABASE_URL}/functions/v1/get-pricing?laundromat_id=<id>` (that laundromat's own prices; booking) and `GET …/get-pricing` ("from" prices across laundromats; marketing pages). Base prices are set by each laundromat; M&M sets delivery fee, VAT and promo codes. |
+| Creating an order and paying | `POST {SUPABASE_URL}/functions/v1/create-order` (`payment_method: 'ozow'`) then redirect to Ozow |
+| Contact, business, driver and laundromat-partner forms | `POST {SUPABASE_URL}/functions/v1/submit-form` (draft in `supabase-functions-to-add/`) |
+| Bot / abuse protection | Firebase App Check (reCAPTCHA Enterprise), sent as `X-Firebase-AppCheck` |
+
+The Express server stores **no user data**: it serves static files with security headers,
+renders `/config.js` (public client config from env), redirects Ozow's return POST to the
+order page and falls back to `index.html` for SPA routes.
+
+## Run locally
+
+Requires Node.js 20.11+.
+
+    npm install
+    cp .env.example .env          # fill in the public Firebase/Supabase values
+    npm run dev                   # http://localhost:3000
+
+Without Firebase/Supabase values the marketing pages work and sign-in/booking show a
+"not available" message.
+
+## Production
+
+    npm ci --omit=dev
+    npm start                     # NODE_ENV=production
+
+In production the server refuses to start without `SITE_URL` and the Firebase/Supabase
+public config, and if `SUPABASE_ANON_KEY` is a service-role key.
+
+Backend setup the website needs:
+
+- Add the website origin (e.g. `https://www.your-domain.co.za`) to the edge functions'
+  `ALLOWED_ORIGINS` secret (CORS and Ozow `return_url`).
+- Add the website domain to Firebase Auth > Authorized domains, and register it for the
+  reCAPTCHA Enterprise key used by App Check.
+- Deploy `submit-form` and apply its migration (see below).
+
+## What the owner must supply (env, see `.env.example`)
+
+Nothing below has a placeholder on the site: unset details are simply hidden.
+
+- `CONTACT_PHONE`, `CONTACT_EMAIL`, `PRIVACY_EMAIL`, `SUPPORT_HOURS`, `SERVICE_AREAS` — contact page,
+  accessibility/privacy pages, structured data.
+- `APP_STORE_URL`, `PLAY_STORE_URL` — "Get the app" links (header menu, drawer, home, footer, /kyc) and
+  the "Open in the app" buttons (order pages, /orders, /kyc, after a driver/partner application).
+- `APPLE_TEAM_ID`, `ANDROID_SHA256_CERT_FINGERPRINTS` — served at `/.well-known/apple-app-site-association`
+  and `/.well-known/assetlinks.json` so website links open the app. In the app repo, replace
+  `www.example.co.za` in `ios/App/App/App.entitlements` and `android/app/src/main/AndroidManifest.xml`
+  with the real website host.
+
+## Website ↔ app links
+
+| Website URL | App screen |
+| --- | --- |
+| `/orders/<id>` (and Ozow's `/order/<id>`) | `/order/<id>` order details and live tracking |
+| `/orders` | `/history` |
+| `/book` | `/order/new` |
+| `/kyc` | `/kyc` documents + Persona identity check |
+
+The app's router is `src/lib/deepLinks.ts`. "Open in the app" uses `com.laundromatmarketplace://open/<path>`
+(iOS) or an `intent:` URL with a Play Store fallback (Android).
+
+## Performance
+
+Marketing pages load no SDK: prices and the partner list come from plain `fetch` (`js/public-api.js`).
+The Firebase/Supabase bundles load only on account pages, when the visitor was signed in before, or
+when a form is about to be submitted (App Check). Text assets are served brotli/gzip compressed with
+ETags; `?v=` URLs and fonts are cached for a year. Home page at 390px: about 1.29 MB before, 136 KB after.
+
+## Code layout
+
+- `index.html` — all pages (`<section data-route>`), header, drawer, footer, SEO.
+- `styles.css` — design system (tokens in `:root`).
+- `js/main.js` — router, link handling, header state; loads `js/marketing.js` everywhere and `js/pages.js` only where needed.
+- `js/site.js` — owner-supplied details and the Open-in-app links. `js/public-api.js` — SDK-free public reads.
+- `js/realtime-adapter.js` — the only place that knows the live-tracking tables/RPC.
+- `js/nav.js` — accessible dropdown menus and mobile drawer.
+- `js/backend.js` — Firebase + Supabase clients, App Check, `callFunction()`.
+- `js/orders-api.js` — **the only place** that knows the create-order / get-pricing contract
+  and the RLS queries.
+- `js/booking.js`, `js/account.js`, `js/pages.js` — booking wizard, orders/tracking/account,
+  auth and form pages.
+- `vendor/` — self-hosted, pinned Firebase and supabase-js bundles. Rebuild with
+  `npm run build:vendor` after changing the exact versions in `devDependencies`.
+
+## Edge functions to add to the app repo
+
+`supabase-functions-to-add/` holds code that belongs in the app repo's `supabase/` folder:
+
+- `submit-form/index.ts` → `supabase/functions/submit-form/` (uses `../_shared/http.ts`;
+  deploy with `--no-verify-jwt`).
+- `migrations/20261019000000_website_forms.sql` → `supabase/migrations/`.
