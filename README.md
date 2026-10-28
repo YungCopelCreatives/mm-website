@@ -53,9 +53,9 @@ Nothing below has a placeholder on the site: unset details are simply hidden.
 - `APP_STORE_URL`, `PLAY_STORE_URL` — "Get the app" links (header menu, drawer, home, footer, /kyc) and
   the "Open in the app" buttons (order pages, /orders, /kyc, after a driver/partner application).
 - `APPLE_TEAM_ID`, `ANDROID_SHA256_CERT_FINGERPRINTS` — served at `/.well-known/apple-app-site-association`
-  and `/.well-known/assetlinks.json` so website links open the app. In the app repo, replace
-  `www.example.co.za` in `ios/App/App/App.entitlements` and `android/app/src/main/AndroidManifest.xml`
-  with the real website host.
+  and `/.well-known/assetlinks.json` so website links open the app. The app claims `mmlaundry.co.za` and
+  `www.mmlaundry.co.za` (`ios/App/App/App.entitlements`, `android/app/src/main/AndroidManifest.xml`);
+  change both there if the website moves.
 
 ## Website ↔ app links
 
