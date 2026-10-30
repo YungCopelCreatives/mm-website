@@ -1,6 +1,6 @@
 {
-  "name": "M&M — Laundry, wherever you are",
-  "description": "Book an on-demand laundry pickup in 60 seconds with live wash tracking, eco-friendly detergents, and transparent rates delivered right to your door.",
+  "name": "M&M Laundry",
+  "description": "Book a laundry pickup from a verified local laundromat, pay with Ozow and track your order.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

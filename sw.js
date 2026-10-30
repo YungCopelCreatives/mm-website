@@ -1,129 +1,71 @@
-// M&M Laundry Service Worker - PWA & Offline Support
-const CACHE_NAME = 'mm-laundry-v9-clean';
+// M&M Laundry service worker: offline shell and static asset caching.
+// Never caches personal data: Supabase, Firebase and edge-function calls go to other origins
+// and are not intercepted. Bump SW_VERSION whenever a precached file changes.
+const SW_VERSION = '3.3.1';
+const CACHE_PREFIX = 'mm-laundry-';
+const STATIC_CACHE = `${CACHE_PREFIX}static-${SW_VERSION}`;
+const RUNTIME_CACHE = `${CACHE_PREFIX}runtime-${SW_VERSION}`;
+
 const STATIC_ASSETS = [
   '/',
-  '/index.html',
-  '/styles.css',
-  '/app.js',
+  '/styles.css?v=3.3.1',
+  '/js/main.js?v=3.3.0',
+  '/js/ui.js',
+  '/js/nav.js',
+  '/js/site.js',
+  '/js/marketing.js',
+  '/js/public-api.js',
   '/manifest.json',
-  '/src/assets/images/regenerated_image_1790132247415.png',
-  '/src/assets/images/regenerated_image_1790132145150.png',
-  '/src/assets/images/regenerated_image_1790132142954.png',
-  '/src/assets/images/mm_laundry_logo_1789143471006.jpg',
-  '/src/assets/images/laundry_hero_interior_1789125391100.jpg',
-  '/src/assets/images/wash_fold_clothes_1789125402839.jpg',
-  '/src/assets/images/dry_clean_garments_1789125413572.jpg',
-  '/src/assets/images/laundry_doorstep_delivery_1789125425504.jpg',
-  '/src/assets/images/commercial_laundry_business_1789125441255.jpg'
+  '/src/assets/images/icons/logo-mark-64.png',
+  '/src/assets/illustrations/hero.svg',
+  '/src/assets/images/icons/icon-192.png',
+  '/src/assets/fonts/inter-latin-400-normal.woff2',
+  '/src/assets/fonts/inter-latin-500-normal.woff2',
+  '/src/assets/fonts/inter-latin-600-normal.woff2',
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(STATIC_ASSETS);
-    }).then(() => self.skipWaiting())
-  );
+  event.waitUntil(caches.open(STATIC_CACHE).then((c) => c.addAll(STATIC_ASSETS)).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => {
-      return Promise.all(
-        keys.map((key) => {
-          if (key !== CACHE_NAME) {
-            return caches.delete(key);
-          }
-        })
-      );
-    }).then(() => self.clients.claim())
+    caches.keys().then((keys) => Promise.all(
+      keys.filter((k) => k.startsWith(CACHE_PREFIX) && k !== STATIC_CACHE && k !== RUNTIME_CACHE).map((k) => caches.delete(k)),
+    )).then(() => self.clients.claim()),
   );
 });
 
+const ok = (res) => res && res.status === 200 && res.type === 'basic';
+
 self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
+  const req = event.request;
+  if (req.method !== 'GET') return;
+  const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
+  // Runtime config must always be fresh.
+  if (url.pathname === '/config.js' || url.pathname.startsWith('/.well-known/')) return;
 
-  // 1. Bypass AI Studio internal scripts, control plane, and non-GET requests
-  if (
-    url.pathname.includes('_aistudio') ||
-    url.pathname.startsWith('/__aistudio') ||
-    event.request.method !== 'GET'
-  ) {
+  if (req.mode === 'navigate') {
+    event.respondWith(fetch(req).then((res) => {
+      if (ok(res)) { const copy = res.clone(); caches.open(RUNTIME_CACHE).then((c) => c.put('/', copy)); }
+      return res;
+    }).catch(() => caches.match('/')));
     return;
   }
 
-  // 2. Network-First for API requests (never cache user secrets/credentials)
-  if (url.pathname.startsWith('/api/')) {
-    event.respondWith(
-      fetch(event.request).catch(() => {
-        return new Response(JSON.stringify({
-          error: 'Offline mode active. Your connection was temporarily interrupted. Live request could not reach dispatch server.',
-          offline: true
-        }), {
-          status: 503,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      })
-    );
+  if (req.destination === 'image' || req.destination === 'font' || url.pathname.startsWith('/vendor/')) {
+    event.respondWith(caches.match(req).then((hit) => hit || fetch(req).then((res) => {
+      if (ok(res)) { const copy = res.clone(); caches.open(RUNTIME_CACHE).then((c) => c.put(req, copy)); }
+      return res;
+    })));
     return;
   }
 
-  // 3. Cache-First for static assets (images, logos, fonts, css)
-  if (event.request.destination === 'image' || url.pathname.match(/\.(jpg|jpeg|png|webp|svg|ico)$/)) {
-    event.respondWith(
-      caches.match(event.request).then((cached) => {
-        if (cached) return cached;
-        return fetch(event.request).then((networkRes) => {
-          if (networkRes && networkRes.status === 200) {
-            const ct = networkRes.headers.get('content-type') || '';
-            // Only cache if it is an actual image or binary, never HTML error pages
-            if (!ct.includes('text/html')) {
-              const clone = networkRes.clone();
-              caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-            }
-          }
-          return networkRes;
-        });
-      })
-    );
-    return;
+  if (['script', 'style', 'manifest'].includes(req.destination)) {
+    event.respondWith(fetch(req).then((res) => {
+      if (ok(res)) { const copy = res.clone(); caches.open(RUNTIME_CACHE).then((c) => c.put(req, copy)); }
+      return res;
+    }).catch(() => caches.match(req, { ignoreSearch: true })));
   }
-
-  // 4. Scripts (.js) must NEVER cache HTML error responses or return HTML fallback
-  if (event.request.destination === 'script' || url.pathname.endsWith('.js')) {
-    event.respondWith(
-      fetch(event.request).then((networkResponse) => {
-        if (networkResponse && networkResponse.status === 200) {
-          const ct = networkResponse.headers.get('content-type') || '';
-          if (ct.includes('javascript')) {
-            const clone = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-          }
-        }
-        return networkResponse;
-      }).catch(() => {
-        return caches.match(event.request);
-      })
-    );
-    return;
-  }
-
-  // 5. HTML Navigations (Stale-While-Revalidate with /index.html fallback strictly for navigations)
-  event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      const fetchPromise = fetch(event.request).then((networkResponse) => {
-        if (networkResponse && networkResponse.status === 200) {
-          const clone = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return networkResponse;
-      }).catch(() => {
-        // Only return /index.html if this is an explicit page navigation
-        if (event.request.mode === 'navigate') {
-          return caches.match('/index.html');
-        }
-      });
-
-      return cachedResponse || fetchPromise;
-    })
-  );
 });
