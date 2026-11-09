@@ -129,7 +129,8 @@ export function pickupTimeString(draft) {
  * Builds the create-order body from the booking draft.
  * Contract (create-order, Ozow version):
  *   request_id, laundromat_id, service, basket_size | item_count, address_id, pickup_time,
- *   payment_method: 'ozow', promo_code?, notes?, return_url?, dry_run?
+ *   payment_method: 'ozow' | 'wallet', promo_code?, notes?, return_url?, dry_run?
+ * 'wallet' charges the customer's M&M wallet on the server (insufficient balance is refused there).
  */
 export function buildCreateOrderRequest(draft, { addressId, requestId, returnUrl, dryRun = false } = {}) {
   const svc = SERVICES[draft.service];
@@ -138,7 +139,7 @@ export function buildCreateOrderRequest(draft, { addressId, requestId, returnUrl
     laundromat_id: draft.laundromat_id,
     service: draft.service,
     pickup_time: pickupTimeString(draft),
-    payment_method: 'ozow',
+    payment_method: draft.payment_method === 'wallet' ? 'wallet' : 'ozow',
   };
   if (svc?.kind === 'basket') body.basket_size = draft.basket_size;
   else body.item_count = Math.max(1, Math.min(MAX_ITEMS, Math.trunc(num(draft.item_count, 1))));
@@ -201,12 +202,20 @@ export async function getOrderPin(orderId) {
   return data?.pin || null;
 }
 
+/** Wallet balance for paying from the M&M wallet (own profile, RLS). Top-ups happen in the app (Ozow). */
+export async function getWalletBalance(uid) {
+  if (!uid) return null;
+  const { data, error } = await sb.from('profiles').select('wallet_balance').eq('id', uid).maybeSingle();
+  if (error) return null;
+  return data ? Number(data.wallet_balance || 0) : null;
+}
+
 /** Driver card (name, phone, vehicle), visible to the customer only while the order is active (RLS: is_counterparty). Live position: realtime-adapter.js. */
 export async function getDriver(driverId) {
   if (!driverId) return null;
   const [{ data: profile }, { data: drv }] = await Promise.all([
     sb.from('profiles').select('full_name, phone').eq('id', driverId).maybeSingle(),
-    sb.from('drivers').select('vehicle_model, vehicle_plate, vehicle_type').eq('profile_id', driverId).maybeSingle(),
+    sb.from('drivers').select('vehicle_model, vehicle_plate, vehicle_type, rating, reviews_count').eq('profile_id', driverId).maybeSingle(),
   ]);
   if (!profile && !drv) return null;
   return { ...(profile || {}), ...(drv || {}) };
