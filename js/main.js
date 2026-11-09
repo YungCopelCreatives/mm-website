@@ -54,6 +54,28 @@ function scrollToHash(hash) {
   return true;
 }
 
+// Keep the head tags in step with the visible page (the server renders the same values for
+// each URL, so crawlers and link previews see them without JavaScript).
+const DEFAULT_DESCRIPTION = pages.find((p) => p.dataset.route === '/')?.dataset.description || '';
+const headTag = (sel) => document.head.querySelector(sel);
+function syncHead(m) {
+  const title = m.el.dataset.title || 'M&M Laundry';
+  const description = m.el.dataset.description || DEFAULT_DESCRIPTION;
+  document.title = title;
+  const canonical = headTag('link[rel="canonical"]');
+  const origin = canonical ? new URL(canonical.href, location.href).origin : location.origin;
+  const url = origin + (m.route.includes(':') || m.route === '404' ? '/' : m.route);
+  const set = (sel, attr, value) => headTag(sel)?.setAttribute(attr, value);
+  set('meta[name="description"]', 'content', description);
+  set('meta[property="og:description"]', 'content', description);
+  set('meta[name="twitter:description"]', 'content', description);
+  set('meta[property="og:title"]', 'content', title);
+  set('meta[name="twitter:title"]', 'content', title);
+  set('meta[property="og:url"]', 'content', url);
+  set('link[rel="canonical"]', 'href', url);
+  for (const el of document.head.querySelectorAll('link[rel="alternate"][hreflang]')) el.setAttribute('href', url);
+}
+
 export function route({ focus = false } = {}) {
   const path = location.pathname.replace(/\/+$/, '') || '/';
   const m = match(path);
@@ -68,7 +90,7 @@ export function route({ focus = false } = {}) {
   }
 
   for (const p of pages) p.hidden = p !== m.el;
-  document.title = m.el.dataset.title || 'M&M Laundry';
+  syncHead(m);
   onRouteChange(path);
 
   renderAppCtas(m.el);
