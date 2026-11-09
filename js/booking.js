@@ -4,7 +4,7 @@
 import { $, $$, html, raw, render, money, toast, busy, uuid, store, validate } from './ui.js';
 import {
   SERVICES, BASKET_SIZES, TIME_SLOTS, MAX_ITEMS, fetchPricing, EMPTY_PRICING, estimate, quoteOrder, createOrder, offers, fromBasketPrice,
-  returnUrlFor, isSafePaymentUrl, listLaundromats, listAddresses, addAddress,
+  returnUrlFor, isSafePaymentUrl, listLaundromats, listAddresses, addAddress, getWalletBalance,
 } from './orders-api.js';
 import { isConfigured, resendVerification, refreshVerification } from './backend.js';
 import { attachAutocomplete } from './maps.js';
@@ -25,13 +25,14 @@ let addresses = [];
 let quote = null;
 let quoteKey = '';
 let root = null;
+let walletBalance = null; // signed-in customer's M&M wallet (null = unknown / not loaded)
 
 function defaults() {
   return {
     step: 0, service: 'wash_fold', basket_size: 'small', item_count: 1,
     address_mode: 'new', address_id: null, address: { address: '', unit: '', lat: null, lng: null },
     laundromat_id: '', pickup_date: '', pickup_slot: '', detergent: '', notes: '', promo_code: '',
-    request_id: null, terms: false,
+    request_id: null, terms: false, payment_method: 'ozow',
   };
 }
 const save = () => store.set(KEY, draft);
@@ -226,9 +227,48 @@ function stepReview() {
         </div></div>` : ''}
       ${isConfigured && user ? html`
         <label class="check"><input type="checkbox" name="terms" required ${raw(draft.terms ? 'checked' : '')}> <span>I agree to the <a class="text-link" href="/terms" data-link>terms of service</a> and the <a class="text-link" href="/privacy" data-link>privacy policy</a>, and I understand that my details are shared with the laundromat and driver for this order.</span></label>
-        <p class="t-small t-secondary">You will be sent to Ozow to pay by instant EFT. If payment is not completed within an hour, the booking is cancelled and nothing is charged.</p>` : ''}
+        ${paymentChoice()}` : ''}
       <p class="form-status" role="status" aria-live="polite"></p>
     </div>`;
+}
+
+function orderTotal() {
+  return quote?.total_amount ?? estimate(pricing, draft)?.total_amount ?? null;
+}
+
+function payLabel() {
+  const total = orderTotal();
+  return draft.payment_method === 'wallet' ? `Pay${total != null ? ` ${money(total)}` : ''} from wallet` : 'Pay with Ozow';
+}
+
+// Wallet (same balance as the app, topped up there) or Ozow instant EFT. The server charges the
+// wallet and refuses the order if the balance is too low, so this is display only.
+function paymentChoice() {
+  const total = orderTotal();
+  const hasWallet = walletBalance != null && walletBalance > 0;
+  const enough = hasWallet && total != null && walletBalance >= total;
+  if (draft.payment_method === 'wallet' && !enough) draft.payment_method = 'ozow';
+  return html`
+    ${hasWallet ? html`
+      <fieldset class="fieldset">
+        <legend class="t-h4">Pay with</legend>
+        <div class="tiles tiles-2">
+          <label class="tile"><input type="radio" name="payment_method" value="wallet" ${raw(draft.payment_method === 'wallet' ? 'checked' : '')} ${raw(enough ? '' : 'disabled')}>
+            <span class="tile-body"><span><span class="tile-title">M&amp;M wallet</span><br><span class="tile-meta">Balance ${money(walletBalance)}${enough ? '' : ', not enough for this order'}</span></span></span></label>
+          <label class="tile"><input type="radio" name="payment_method" value="ozow" ${raw(draft.payment_method !== 'wallet' ? 'checked' : '')}>
+            <span class="tile-body"><span><span class="tile-title">Ozow instant EFT</span><br><span class="tile-meta">Pay from your bank</span></span></span></label>
+        </div>
+      </fieldset>` : ''}
+    <p class="t-small t-secondary" id="payNote">${draft.payment_method === 'wallet'
+      ? 'The total is taken from your M&M wallet when you confirm. Top up your wallet in the M&M app.'
+      : 'You will be sent to Ozow to pay by instant EFT. If payment is not completed within an hour, the booking is cancelled and nothing is charged.'}</p>`;
+}
+
+async function loadWallet() {
+  const { user } = ctx.getSession();
+  const prev = walletBalance;
+  walletBalance = user ? await getWalletBalance(user.uid).catch(() => null) : null;
+  if (walletBalance !== prev && draft.step === 2) draw();
 }
 
 function draw() {
@@ -244,7 +284,7 @@ function draw() {
         <div class="wizard-actions">
           ${draft.step > 0 ? html`<button type="button" class="btn btn-secondary" data-action="back">Back</button>` : html`<span></span>`}
           ${draft.step < 2 ? html`<button type="submit" class="btn btn-primary">Continue</button>`
-            : html`<button type="submit" class="btn btn-primary" ${raw(canPay ? '' : 'disabled')}>Pay with Ozow</button>`}
+            : html`<button type="submit" class="btn btn-primary" ${raw(canPay ? '' : 'disabled')}>${payLabel()}</button>`}
         </div>
       </form>
       <aside class="wizard-aside" id="bookSummary">${summary()}</aside>
@@ -266,7 +306,7 @@ async function refreshQuote() {
     if (q && k === keyFor()) {
       quote = { ...q, lines: (q.lines || []).map((l) => ({ label: l.label || l.name || `${SERVICES[l.service]?.label || 'Item'}${l.basket_size ? ` · ${BASKET_SIZES[l.basket_size]?.label || l.basket_size}` : l.quantity ? ` · ${l.quantity}` : ''}`, amount: l.amount ?? l.total ?? l.line_total ?? 0 })) };
       quoteKey = k;
-      redrawSummary();
+      if (walletBalance) draw(); else redrawSummary();
     }
   } catch (err) {
     quote = null;
@@ -344,14 +384,14 @@ function go(step) {
   save();
   draw();
   $('.progress', root)?.scrollIntoView({ block: 'nearest' });
-  if (draft.step === 2) refreshQuote();
+  if (draft.step === 2) { refreshQuote(); loadWallet(); }
 }
 
 async function pay(form, button) {
   const { user } = ctx.getSession();
   if (!user) return;
   if (!validate(form)) return;
-  const restore = busy(button, 'Preparing payment');
+  const restore = busy(button, draft.payment_method === 'wallet' ? 'Paying from wallet' : 'Preparing payment');
   const status = $('.form-status', form);
   status.textContent = '';
   try {
@@ -409,6 +449,7 @@ function bind() {
     }
     if (t.name === 'laundromat_id') { draft.laundromat_id = t.value; quote = null; save(); loadLaundromatPricing(); return; }
     if (t.name === 'terms') { draft.terms = t.checked; save(); }
+    if (t.name === 'payment_method') { readStep($('#bookForm', root)); draft.payment_method = t.value === 'wallet' ? 'wallet' : 'ozow'; save(); draw(); }
   });
   root.addEventListener('click', async (e) => {
     const b = e.target.closest('button');
@@ -477,6 +518,6 @@ export async function showBooking({ query, session }, context) {
       if (a.length && !draft.address.address && !draft.address_id) { draft.address_mode = 'saved'; draft.address_id = a[0].id; save(); }
       if (draft.step >= 1) draw();
     }).catch(() => { addresses = []; });
-    if (draft.step === 2) refreshQuote();
+    if (draft.step === 2) { refreshQuote(); loadWallet(); }
   } else addresses = [];
 }
