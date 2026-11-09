@@ -177,4 +177,22 @@ document.addEventListener('pointerover', (e) => {
   if (a) loadAccount();
 }, { passive: true });
 
+// ---- Live support chat: the module loads on first open (or when a chat from an earlier visit exists)
+let chatModule = null;
+const loadChat = () => (chatModule ||= import('./support-chat.js'));
+document.addEventListener('click', (e) => {
+  const trigger = e.target.closest?.('#chatLauncher, [data-open-chat]');
+  if (!trigger) return;
+  e.preventDefault();
+  loadChat().then((m) => (trigger.id === 'chatLauncher' ? m.toggle() : m.open())).catch((err) => {
+    console.error('M&M: chat could not load', err);
+    navigate('/contact');
+  });
+});
+let hasGuestChat = false;
+try { hasGuestChat = Boolean(localStorage.getItem('mm.support.guest')); } catch { /* storage unavailable */ }
+if (hasGuestChat) idle(() => loadChat().then((m) => m.resume()).catch(() => {}));
+// Warm the chat module when the pointer heads for the button
+document.getElementById('chatLauncher')?.addEventListener('pointerenter', () => { loadChat().catch(() => {}); }, { once: true });
+
 export const _debug = () => ({ pagesModule, currentSession });
