@@ -4,6 +4,7 @@ Allow: /
 Disallow: /book
 Disallow: /account
 Disallow: /orders
+Disallow: /order/
 Disallow: /login
 Disallow: /signup
 Disallow: /forgot-password

@@ -28,3 +28,10 @@ jobs:
             code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:3999$p")
             echo "$p $code"; [ "$code" = 200 ] || exit 1
           done
+          # SEO: each page has its own canonical and title, valid JSON-LD, and a sitemap
+          curl -s http://localhost:3999/services | grep -q '<link rel="canonical" href="http://localhost:3999/services">' || { echo "canonical missing"; exit 1; }
+          curl -s http://localhost:3999/faq | grep -q '<title>Questions and answers' || { echo "title missing"; exit 1; }
+          curl -s http://localhost:3999/faq | python3 -c "import re,json,sys; g=json.loads(re.search(r'<script type=\"application/ld\+json\">(.*?)</script>', sys.stdin.read(), re.S).group(1))['@graph']; assert any(n.get('@type')=='FAQPage' and n.get('mainEntity') for n in g)"
+          curl -s http://localhost:3999/sitemap.xml | grep -q '<loc>http://localhost:3999/services</loc>' || { echo "sitemap missing"; exit 1; }
+          curl -s http://localhost:3999/orders | grep -q 'content="noindex' || { echo "noindex missing"; exit 1; }
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3999/services/)" = 301 ] || { echo "trailing slash redirect missing"; exit 1; }
