@@ -69,6 +69,29 @@ Nothing below has a placeholder on the site: unset details are simply hidden.
 The app's router is `src/lib/deepLinks.ts`. "Open in the app" uses `com.laundromatmarketplace://open/<path>`
 (iOS) or an `intent:` URL with a Play Store fallback (Android).
 
+## SEO
+
+Every page is a `<section data-route data-title data-description>` in `index.html`. For each URL
+the server renders that page's own `<title>`, meta description, canonical, `hreflang` (en-ZA),
+Open Graph and Twitter tags and JSON-LD, and un-hides that page's section, so Google, WhatsApp and
+Facebook previews get the right page without running JavaScript. `js/main.js` keeps the same tags
+in step during in-app navigation. To add a page: add the section with a `data-description`
+(under 160 characters) and add its path to `SPA_ROUTES` in `server.js`.
+
+- Structured data (`@graph`): `DryCleaningOrLaundryService` organisation with services, service
+  areas (`SERVICE_AREAS`), contact point, address and hours when set; `WebSite`; the page itself
+  (`AboutPage`, `ContactPage`, `FAQPage` with the visible questions, or `WebPage`); `BreadcrumbList`.
+- `/sitemap.xml` is generated from `SPA_ROUTES` minus the private pages; `/robots.txt` blocks
+  account, booking and order pages, which also send `noindex`.
+- One URL per page: `/page/` redirects to `/page`, and in production the other host spelling
+  (`mmlaundry.co.za` vs `www.mmlaundry.co.za`) redirects to `SITE_URL`.
+- Search Console / Bing verification and social profiles: `GOOGLE_SITE_VERIFICATION`,
+  `BING_SITE_VERIFICATION`, `SOCIAL_PROFILES` (see `.env.example`).
+
+After launch: verify the domain in Google Search Console and submit `https://<SITE_URL>/sitemap.xml`,
+create a Google Business Profile (service-area business, category "Laundry service") with the
+same name, phone and website as `.env`, and add its URL to `SOCIAL_PROFILES`.
+
 ## Performance
 
 Marketing pages load no SDK: prices and the partner list come from plain `fetch` (`js/public-api.js`).

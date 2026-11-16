@@ -56,6 +56,19 @@ const SITE = Object.freeze({
   androidPackage: clean(env.ANDROID_PACKAGE, 100) || 'com.laundromatmarketplace',
 });
 
+// Search and local SEO (all optional; see .env.example).
+const httpsList = (v) => String(v || '').split(',').map((x) => httpsUrl(x.trim())).filter(Boolean);
+const SEO = Object.freeze({
+  googleVerification: clean(env.GOOGLE_SITE_VERIFICATION, 100).replace(/[^\w-]/g, ''),
+  bingVerification: clean(env.BING_SITE_VERIFICATION, 100).replace(/[^\w-]/g, ''),
+  socialProfiles: httpsList(env.SOCIAL_PROFILES),          // Facebook, Instagram, TikTok, LinkedIn… page URLs
+  street: clean(env.ADDRESS_STREET, 120),
+  city: clean(env.ADDRESS_CITY, 80),
+  province: clean(env.ADDRESS_PROVINCE, 80),
+  postalCode: clean(env.ADDRESS_POSTAL_CODE, 10),
+  openingHours: clean(env.OPENING_HOURS, 120),             // schema.org format, e.g. "Mo-Su 07:00-20:00"
+});
+
 // Universal Links / App Links (website URLs open the app when it is installed).
 const IOS_BUNDLE_ID = clean(env.IOS_BUNDLE_ID, 100) || 'com.laundromat.marketplace';
 const APPLE_TEAM_ID = /^[A-Z0-9]{10}$/.test(env.APPLE_TEAM_ID || '') ? env.APPLE_TEAM_ID : ''; // TODO(owner)
@@ -186,6 +199,25 @@ app.use((req, res, next) => {
   next();
 });
 
+/* ---- one URL per page (SEO) ----
+   In production, the other spelling of the site's host (example.co.za vs www.example.co.za)
+   redirects to SITE_URL, and /page/ redirects to /page. App-link files are never redirected:
+   Apple and Google fetch them on both hosts. */
+const SITE_HOST = (() => { try { return new URL(SITE_URL).hostname.toLowerCase(); } catch { return ''; } })();
+const bareHost = (h) => h.replace(/^www\./, '');
+app.use((req, res, next) => {
+  if ((req.method !== 'GET' && req.method !== 'HEAD') || req.path.startsWith('/.well-known/') || req.path === '/apple-app-site-association' || req.path === '/healthz') return next();
+  const host = String(req.hostname || '').toLowerCase();
+  const query = req.originalUrl.slice(req.path.length);
+  const wrongHost = IS_PROD && SITE_HOST && host && host !== SITE_HOST && bareHost(host) === bareHost(SITE_HOST);
+  const slash = req.path.length > 1 && req.path.endsWith('/');
+  if (!wrongHost && !slash) return next();
+  // Collapse leading slashes so //evil.example/ can never become a protocol-relative redirect.
+  const pathname = (slash ? req.path.replace(/\/+$/, '') : req.path).replace(/^\/+/, '/') || '/';
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  return res.redirect(301, `${wrongHost ? SITE_URL : ''}${pathname}${query}`);
+});
+
 /* ========================================================================
    TEMPLATES & STATIC FILES (explicit allow-list — never serve the project root)
    ======================================================================== */
@@ -198,7 +230,6 @@ const escHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<'
  * Owner-supplied business details are rendered on the server (no flash, works without JS):
  *   <!--site:key-->…<!--/site:key-->  kept only when that detail is set (removed otherwise)
  *   {{site.key}}                       the value, HTML-escaped; {{site.key.tel}} digits for tel: links
- *   __LD_CONTACT__                     JSON-LD contact fields (empty when nothing is set)
  */
 function renderSite(htmlText) {
   const has = {
@@ -211,18 +242,10 @@ function renderSite(htmlText) {
     const v = SITE[key] || '';
     return escHtml(tel ? v.replace(/[^+\d]/g, '') : v);
   });
-  const ld = {};
-  if (SITE.supportPhone) ld.telephone = SITE.supportPhone;
-  if (SITE.supportEmail) ld.email = SITE.supportEmail;
-  if (SITE.serviceAreas) ld.areaServed = SITE.serviceAreas.split(',').map((x) => x.trim()).filter(Boolean);
-  const sameAs = [SITE.appStoreUrl, SITE.playStoreUrl].filter(Boolean);
-  if (sameAs.length) ld.sameAs = sameAs;
-  const ldText = Object.entries(ld).map(([k, v]) => `"${k}": ${JSON.stringify(v).replace(/</g, '\\u003c')},`).join('\n        ');
-  return out.replace('__LD_CONTACT__', ldText);
+  return out;
 }
 const INDEX_HTML = renderSite(readTemplate('index.html'));
 const ROBOTS_TXT = readTemplate('robots.txt');
-const SITEMAP_XML = readTemplate('sitemap.xml');
 const CONFIG_JS = `window.__MM_CONFIG__ = Object.freeze(${JSON.stringify(PUBLIC_CONFIG).replace(/</g, '\\u003c')});\n`;
 
 // Every route the SPA renders. Keep in sync with data-route in index.html.
@@ -233,22 +256,196 @@ const SPA_ROUTES = new Set([
 ]);
 const DYNAMIC_ROUTES = [/^\/orders\/[0-9a-f-]{36}$/i];
 const NOINDEX = ['/book', '/orders', '/account', '/login', '/signup', '/forgot-password', '/kyc'];
+const isNoindex = (p) => NOINDEX.some((x) => p === x || p.startsWith(x + '/'));
 
-const PAGE_TITLES = {};
-for (const m of INDEX_HTML.matchAll(/data-route="([^"]+)" data-title="([^"]+)"/g)) PAGE_TITLES[m[1]] = m[2];
+/* ========================================================================
+   SEO: per-page head, structured data and sitemap
+   Every page is one <section data-route data-title data-description> in index.html. The
+   server renders each route's own title, description, canonical, Open Graph tags and JSON-LD,
+   and shows that route's section in the HTML, so crawlers and link previews get the right
+   page without running JavaScript. The client keeps the same tags in sync (js/main.js).
+   ======================================================================== */
+const unHtml = (v) => String(v).replace(/<[^>]+>/g, '').replace(/&(amp|lt|gt|quot|#39|nbsp);/g, (m, e) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", nbsp: ' ' }[e])).replace(/\s+/g, ' ').trim();
+const attrOf = (attrs, name) => (attrs.match(new RegExp(`\\b${name}="([^"]*)"`)) || [])[1] || '';
+
+// route -> { title, description (HTML-escaped as in index.html), crumb, html }
+const PAGES = {};
+{
+  const starts = [...INDEX_HTML.matchAll(/<section class="page" data-route="([^"]+)"([^>]*)>/g)];
+  starts.forEach((m, i) => {
+    const html = INDEX_HTML.slice(m.index, i + 1 < starts.length ? starts[i + 1].index : INDEX_HTML.indexOf('</main>'));
+    PAGES[m[1]] = {
+      title: attrOf(m[2], 'data-title'),
+      description: attrOf(m[2], 'data-description'),
+      crumb: unHtml((html.match(/<li aria-current="page">([^<]+)<\/li>/) || [])[1] || ''),
+      html,
+    };
+  });
+}
+const DEFAULT_DESCRIPTION = PAGES['/'].description;
+const PAGE_TYPES = { '/about': 'AboutPage', '/contact': 'ContactPage', '/faq': 'FAQPage' };
+
+// Questions and answers come from the visible FAQ, so the structured data always matches the page.
+const FAQ = [...(PAGES['/faq']?.html || '').matchAll(/<details><summary>([\s\S]*?)<\/summary><div class="answer">([\s\S]*?)<\/div><\/details>/g)]
+  .map(([, q, a]) => ({
+    '@type': 'Question',
+    name: unHtml(q),
+    acceptedAnswer: { '@type': 'Answer', text: unHtml(a.replace(/<span data-needs-price hidden>(?:[^<]|<span[^>]*><\/span>)*<\/span>/g, '')) },
+  }));
+
+// Services from the /services cards (name, description, anchor).
+const SERVICES = [...(PAGES['/services']?.html || '').matchAll(/<article class="card[^"]*" id="([^"]+)">\s*<h3[^>]*>([\s\S]*?)<\/h3>\s*<p[^>]*>([\s\S]*?)<\/p>/g)]
+  .map(([, id, name, desc]) => ({ id, name: unHtml(name), description: unHtml(desc) }));
+
+const ORG_ID = `${SITE_URL}/#organization`;
+const WEBSITE_ID = `${SITE_URL}/#website`;
+const OG_IMAGE = `${SITE_URL}/src/assets/images/og-image-1200x630.jpg`;
+
+function organizationLd() {
+  const areas = SITE.serviceAreas.split(',').map((x) => x.trim()).filter(Boolean);
+  const country = { '@type': 'Country', name: 'South Africa' };
+  const org = {
+    '@type': ['DryCleaningOrLaundryService', 'Organization'],
+    '@id': ORG_ID,
+    name: 'M&M Laundry',
+    alternateName: 'M&M Laundry Services',
+    legalName: 'M&M Laundry Services (Pty) Ltd',
+    url: `${SITE_URL}/`,
+    logo: { '@type': 'ImageObject', url: `${SITE_URL}/src/assets/images/icons/icon-512.png`, width: 512, height: 512 },
+    image: OG_IMAGE,
+    description: unHtml(DEFAULT_DESCRIPTION),
+    areaServed: areas.length ? areas.map((name) => ({ '@type': 'City', name, containedInPlace: country })) : country,
+    currenciesAccepted: 'ZAR',
+    paymentAccepted: 'Ozow instant EFT',
+    address: {
+      '@type': 'PostalAddress',
+      ...(SEO.street ? { streetAddress: SEO.street } : {}),
+      ...(SEO.city ? { addressLocality: SEO.city } : {}),
+      ...(SEO.province ? { addressRegion: SEO.province } : {}),
+      ...(SEO.postalCode ? { postalCode: SEO.postalCode } : {}),
+      addressCountry: 'ZA',
+    },
+    knowsLanguage: 'en-ZA',
+    hasOfferCatalog: {
+      '@type': 'OfferCatalog',
+      name: 'Laundry pickup and delivery services',
+      itemListElement: SERVICES.map((sv) => ({
+        '@type': 'Offer',
+        priceCurrency: 'ZAR',
+        itemOffered: { '@type': 'Service', name: sv.name, description: sv.description, url: `${SITE_URL}/services#${sv.id}`, provider: { '@id': ORG_ID }, areaServed: country },
+      })),
+    },
+  };
+  if (SITE.supportPhone) org.telephone = SITE.supportPhone;
+  if (SITE.supportEmail) org.email = SITE.supportEmail;
+  if (SEO.openingHours) org.openingHours = SEO.openingHours;
+  if (SITE.supportPhone || SITE.supportEmail) {
+    org.contactPoint = [{
+      '@type': 'ContactPoint',
+      contactType: 'customer support',
+      ...(SITE.supportPhone ? { telephone: SITE.supportPhone } : {}),
+      ...(SITE.supportEmail ? { email: SITE.supportEmail } : {}),
+      areaServed: 'ZA',
+      availableLanguage: ['English'],
+    }];
+  }
+  const sameAs = [...SEO.socialProfiles, SITE.appStoreUrl, SITE.playStoreUrl].filter(Boolean);
+  if (sameAs.length) org.sameAs = sameAs;
+  return org;
+}
+const ORG_LD = organizationLd();
+const WEBSITE_LD = { '@type': 'WebSite', '@id': WEBSITE_ID, url: `${SITE_URL}/`, name: 'M&M Laundry', alternateName: 'M&M Laundry Services', inLanguage: 'en-ZA', publisher: { '@id': ORG_ID } };
+
+function pageLd(route, url, title, description) {
+  const page = {
+    '@type': PAGE_TYPES[route] || 'WebPage',
+    '@id': `${url}#webpage`,
+    url,
+    name: title,
+    description,
+    inLanguage: 'en-ZA',
+    isPartOf: { '@id': WEBSITE_ID },
+    about: { '@id': ORG_ID },
+    primaryImageOfPage: { '@type': 'ImageObject', url: OG_IMAGE },
+  };
+  const graph = [ORG_LD, WEBSITE_LD, page];
+  if (route !== '/' && PAGES[route]?.crumb) {
+    page.breadcrumb = { '@id': `${url}#breadcrumb` };
+    graph.push({
+      '@type': 'BreadcrumbList',
+      '@id': `${url}#breadcrumb`,
+      itemListElement: [
+        { '@type': 'ListItem', position: 1, name: 'Home', item: `${SITE_URL}/` },
+        { '@type': 'ListItem', position: 2, name: PAGES[route].crumb, item: url },
+      ],
+    });
+  }
+  if (route === '/faq' && FAQ.length) page.mainEntity = FAQ;
+  if (route === '/services') page.mainEntity = { '@id': ORG_ID };
+  return JSON.stringify({ '@context': 'https://schema.org', '@graph': graph }, null, 0).replace(/</g, '\\u003c');
+}
+
+const VERIFICATION_META = [
+  SEO.googleVerification && `<meta name="google-site-verification" content="${SEO.googleVerification}">`,
+  SEO.bingVerification && `<meta name="msvalidate.01" content="${SEO.bingVerification}">`,
+].filter(Boolean).join('\n  ');
+
+// Prices and the partner list are fetched from Supabase on marketing pages: open the connection early.
+const PRECONNECT = SUPABASE_ORIGIN ? `<link rel="preconnect" href="${SUPABASE_ORIGIN}" crossorigin>` : '';
+
+const setMeta = (html, re, value) => html.replace(re, (m, pre) => `${pre}${value}"`);
+
+function renderPage(route, p, status) {
+  const meta = PAGES[route] || PAGES['/'];
+  const indexable = status === 200 && !isNoindex(p) && SPA_ROUTES.has(p);
+  const canonicalPath = SPA_ROUTES.has(p) ? p : '/';
+  const url = `${SITE_URL}${canonicalPath}`;
+  const title = meta.title;
+  const description = meta.description || DEFAULT_DESCRIPTION;
+  let html = INDEX_HTML
+    .replace(/<title>[^<]*<\/title>/, `<title>${title}</title>`)
+    .replace('<!--seo:verification-->', VERIFICATION_META)
+    .replace('<!--seo:preconnect-->', PRECONNECT)
+    .replace('__LD_JSON__', pageLd(route, url, unHtml(title), unHtml(description)));
+  html = setMeta(html, /(<meta name="description" content=")[^"]*"/, description);
+  html = setMeta(html, /(<meta property="og:description" content=")[^"]*"/, description);
+  html = setMeta(html, /(<meta name="twitter:description" content=")[^"]*"/, description);
+  html = setMeta(html, /(<meta property="og:title" content=")[^"]*"/, title);
+  html = setMeta(html, /(<meta name="twitter:title" content=")[^"]*"/, title);
+  html = setMeta(html, /(<meta property="og:url" content=")[^"]*"/, url);
+  html = setMeta(html, /(<link rel="canonical" href=")[^"]*"/, url);
+  html = html.replace(/(<link rel="alternate" hreflang="(?:en-ZA|x-default)" href=")[^"]*"/g, `$1${url}"`);
+  if (!indexable) html = setMeta(html, /(<meta name="robots" content=")[^"]*"/, 'noindex, follow');
+  // Show this route's section in the HTML (the client router does the same after load).
+  html = html.replace(/<section class="page" data-route="([^"]+)"([^>]*?)( hidden)?>/g, (m, r, attrs) => `<section class="page" data-route="${r}"${attrs}${r === route ? '' : ' hidden'}>`);
+  return html;
+}
+
+// Sitemap: every indexable page. lastmod is when index.html (the page content) last changed.
+const LASTMOD = (env.SITEMAP_LASTMOD && /^\d{4}-\d{2}-\d{2}$/.test(env.SITEMAP_LASTMOD))
+  ? env.SITEMAP_LASTMOD : fs.statSync(path.join(__dirname, 'index.html')).mtime.toISOString().slice(0, 10);
+const PRIORITY = { '/': '1.0', '/services': '0.9', '/how-it-works': '0.8', '/faq': '0.7', '/partners': '0.7', '/drive': '0.7', '/business': '0.7', '/about': '0.6', '/contact': '0.6' };
+const SITEMAP_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+${[...SPA_ROUTES].filter((r) => !isNoindex(r)).map((r) => `  <url>
+    <loc>${SITE_URL}${r}</loc>
+    <lastmod>${LASTMOD}</lastmod>
+    <priority>${PRIORITY[r] || '0.3'}</priority>${r === '/' ? `
+    <image:image><image:loc>${OG_IMAGE}</image:loc></image:image>` : ''}
+  </url>`).join('\n')}
+</urlset>
+`;
 
 function sendIndex(req, res, status = 200) {
   const p = req.path.replace(/\/+$/, '') || '/';
   const known = SPA_ROUTES.has(p);
-  let html = INDEX_HTML.replace(`<link rel="canonical" href="${SITE_URL}/">`, `<link rel="canonical" href="${SITE_URL}${known ? (p === '/' ? '/' : p) : '/'}">`);
-  if (known && PAGE_TITLES[p]) html = html.replace(/<title>[^<]*<\/title>/, `<title>${PAGE_TITLES[p]}</title>`);
-  if (status !== 200 || NOINDEX.some((x) => p === x || p.startsWith(x + '/'))) {
-    html = html.replace(/<meta name="robots" content="[^"]*">/, '<meta name="robots" content="noindex, nofollow">');
-  }
+  const route = status !== 200 ? '404' : known ? p : p.startsWith('/orders/') ? '/orders/:id' : '404';
   res.status(status);
+  if (status !== 200 || isNoindex(p)) res.setHeader('X-Robots-Tag', 'noindex');
   // One cached copy per distinct page (dynamic order pages and 404s all share one).
-  const cacheKey = `${status}:${known ? p : p.startsWith('/orders/') ? '/orders/*' : '*'}`;
-  sendVariant(req, res, compressedPage(cacheKey, html), 'text/html; charset=utf-8', 'no-cache');
+  const cacheKey = `${status}:${route}`;
+  const hit = compressed.get(`page:${cacheKey}`);
+  sendVariant(req, res, hit || compressedPage(cacheKey, renderPage(route, p, status)), 'text/html; charset=utf-8', 'no-cache');
 }
 
 /* ---- compressed, revalidated text assets ----
