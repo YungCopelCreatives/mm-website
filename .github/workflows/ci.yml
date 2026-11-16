@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm audit --omit=dev --audit-level=high
+      # The server starts and serves the main pages
+      - name: Smoke test
+        run: |
+          PORT=3999 node server.js & sleep 2
+          for p in / /partners /drive /privacy; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:3999$p")
+            echo "$p $code"; [ "$code" = 200 ] || exit 1
+          done
