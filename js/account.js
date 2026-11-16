@@ -211,7 +211,7 @@ export async function showTracking({ params, query, session }, context) {
         ${pin ? html`<div class="card stack-2"><h2 class="t-h4">Handover PIN</h2><p class="pin">${pin}</p><p class="t-small t-secondary">Give this PIN to the driver only when your clean laundry is delivered.</p></div>` : ''}
         ${driver && driverVisible() ? html`<div class="card stack-3">
             <h2 class="t-h4">Your driver</h2>
-            <div class="row"><span class="avatar">${driverName()[0]}</span><div class="stack-1"><span class="t-medium">${driverName()}</span><span class="t-small t-secondary">${[driver.vehicle_model || driver.vehicle_type, driver.vehicle_plate].filter(Boolean).join(' · ')}</span></div>
+            <div class="row"><span class="avatar">${driverName()[0]}</span><div class="stack-1"><span class="t-medium">${driverName()}</span><span class="t-small t-secondary">${driver.rating && driver.reviews_count ? `${Number(driver.rating).toFixed(1)} stars (${driver.reviews_count} ${driver.reviews_count === 1 ? 'rating' : 'ratings'})` : 'New driver'}</span><span class="t-small t-secondary">${[driver.vehicle_model || driver.vehicle_type, driver.vehicle_plate].filter(Boolean).join(' · ')}</span></div>
             ${driver.phone ? html`<a class="btn btn-secondary btn-sm" style="margin-left:auto" href="tel:${driver.phone}">Call</a>` : ''}</div>
             ${mapsEnabled ? html`<div class="map-wrap" data-map-slot ${raw(position || mapHandle ? '' : 'hidden')}></div>` : ''}
             <p class="t-small t-secondary" data-driver-updated>${positionText()}</p>
